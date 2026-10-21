@@ -326,3 +326,9 @@ for crypto in crypto_data:
 - [Kafka Python Documentation](https://kafka-python.readthedocs.io/)
 - [Elasticsearch Python Client](https://elasticsearch-py.readthedocs.io/)
 - [Kibana User Guide](https://www.elastic.co/guide/en/kibana/current/index.html)
+---
+
+## Solution (after submission)
+
+Try to solve the exercise on your own first. After you submit, compare your work with the
+reference solution in [`solution/`](solution/README.md). Its README has the full run order.

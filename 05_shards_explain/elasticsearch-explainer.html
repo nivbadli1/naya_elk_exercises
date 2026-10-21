@@ -1,0 +1,873 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Elasticsearch Shards and Replicas</title>
+<style>
+:root{--bg:#0f172a;--panel:#0b1224;--line:#334155;--text:#f1f5f9;--muted:#94a3b8;--accent:#f59e0b}
+html,body{margin:0;height:100%;background:#020617;color:var(--text);font-family:Inter,"Segoe UI",Helvetica,Arial,sans-serif}
+#wrap{display:flex;flex-direction:column;height:100vh}
+#stage{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:8px 16px}
+#svg{display:block;width:100%;height:auto;max-height:100%;aspect-ratio:16/9;max-width:calc((100vh - 120px) * 16 / 9);cursor:pointer;background:#0f172a;border-radius:6px}
+#controls{padding:6px 16px 12px;background:#0b1224;border-top:1px solid var(--line)}
+#bar{position:relative;height:14px;background:#1e293b;border-radius:7px;cursor:pointer;margin:6px 0 10px}
+#fill{position:absolute;left:0;top:0;bottom:0;background:var(--accent);border-radius:7px;width:0}
+.tick{position:absolute;top:-3px;width:3px;height:20px;background:#e2e8f0;opacity:.55;border-radius:2px}
+#row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;font-size:15px}
+button,select{font:inherit;background:#1e293b;color:var(--text);border:1px solid #475569;border-radius:8px;padding:7px 14px;cursor:pointer}
+button:hover{border-color:var(--accent)}
+#play{min-width:100px;background:var(--accent);color:#0f172a;border-color:var(--accent);font-weight:700}
+#label{font-weight:700}
+#time{color:var(--muted);font-variant-numeric:tabular-nums}
+#chips{display:flex;gap:4px;margin-left:auto}
+#chips button{padding:5px 0;width:34px;font-size:13px}
+#chips button.on{background:var(--accent);color:#0f172a;border-color:var(--accent);font-weight:700}
+#chips button.done{border-color:#64748b;color:#cbd5e1}
+label{color:var(--muted);display:flex;gap:6px;align-items:center}
+body.render #controls{display:none}
+body.render #stage{padding:0}
+body.render #svg{width:1920px;height:1080px;max-width:none;border-radius:0}
+@media (max-width:700px){#chips{margin-left:0}}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="stage"><svg id="svg" viewBox="0 0 1920 1080" xmlns="http://www.w3.org/2000/svg" aria-label="Elasticsearch animated explainer"></svg></div>
+  <div id="controls">
+    <div id="bar" title="Click to jump within the scene"><div id="fill"></div><div id="ticks"></div></div>
+    <div id="row">
+      <button id="prev" title="Previous scene (Left arrow)">&#8249; Prev</button>
+      <button id="play" title="Play / Pause (Space)">&#9654; Play</button>
+      <button id="next" title="Next scene (Right arrow)">Next &#8250;</button>
+      <span id="label"></span>
+      <span id="time"></span>
+      <label title="Stop automatically at every numbered step so the teacher can talk"><input type="checkbox" id="autopause"> Pause at each step</label>
+      <label>Speed <select id="speed"><option>0.5</option><option>0.75</option><option selected>1</option><option>1.25</option><option>1.5</option></select></label>
+      <div id="chips"></div>
+    </div>
+  </div>
+</div>
+<script>
+'use strict';
+/* ================= basics ================= */
+const NS = 'http://www.w3.org/2000/svg';
+const SANS = 'Inter, "Segoe UI", Helvetica, Arial, sans-serif';
+const MONO = '"JetBrains Mono", Consolas, Menlo, "Courier New", monospace';
+const C = {
+  bg:'#0f172a', panel:'#111c33', panel2:'#1e293b', line:'#334155', text:'#f1f5f9', muted:'#94a3b8',
+  green:'#22c55e', greenDark:'#052e16', greenTint:'rgba(34,197,94,0.13)',
+  blue:'#7dd3fc', blueTint:'rgba(125,211,252,0.12)',
+  node:'#1e293b', nodeStroke:'#64748b', gold:'#facc15',
+  req:'#f59e0b', ack:'#c084fc', fail:'#ef4444', paper:'#e2e8f0', ink:'#0f172a'
+};
+const svg = document.getElementById('svg');
+svg.setAttribute('font-family', SANS);
+
+function el(tag, a, p){ const e = document.createElementNS(NS, tag); if (a) for (const k in a) e.setAttribute(k, a[k]); if (p) p.appendChild(e); return e; }
+function T(p, x, y, s, o = {}){
+  const e = el('text', {x, y, 'font-size':o.fs||32, 'font-weight':o.fw||600, fill:o.fill||C.text, 'text-anchor':o.anchor||'start'}, p);
+  if (o.mono) e.setAttribute('font-family', MONO);
+  e.textContent = s; return e;
+}
+const clamp = (v, a = 0, b = 1) => Math.max(a, Math.min(b, v));
+const ease = t => t < .5 ? 4*t*t*t : 1 - Math.pow(-2*t + 2, 3)/2;
+const P = (t, a, b) => ease(clamp((t - a)/(b - a)));           // eased progress a->b
+const lerp = (a, b, p) => a + (b - a)*p;
+const win = (t, a, b, f = .45) => Math.min(P(t, a, a + f), 1 - P(t, b - f, b)); // fade in at a, out at b
+const pulse = (t, a, b) => (t > a && t < b) ? .5 - .5*Math.cos((t - a)*Math.PI*2/ .9) : 0;
+function op(e, o){ o = clamp(o); e.setAttribute('opacity', o < .002 ? 0 : o.toFixed(3)); e.style.visibility = o < .002 ? 'hidden' : 'visible'; }
+function tr(e, x, y, s = 1, r = 0){ e.setAttribute('transform', `translate(${x.toFixed(1)} ${y.toFixed(1)})` + (s !== 1 ? ` scale(${s.toFixed(4)})` : '') + (r ? ` rotate(${r.toFixed(1)})` : '')); }
+function hex(c){ c = c.replace('#',''); return [0,2,4].map(i => parseInt(c.substr(i,2),16)); }
+function mix(a, b, p){ const A = hex(a), B = hex(b); return 'rgb(' + A.map((v,i) => Math.round(lerp(v, B[i], clamp(p)))).join(',') + ')'; }
+function textW(t, s, fs){ let w = 0; try { w = t.getComputedTextLength(); } catch(e){} return w || s.length*fs*.56; }
+
+/* ================= components ================= */
+function Tag(p, x, y, s, o = {}){
+  const g = el('g', {}, p); const fs = o.fs || 26;
+  const r = el('rect', {}, g);
+  const t = T(g, x, y + fs*.35, s, {fs, fw:o.fw||700, fill:o.color||C.text, anchor:'middle', mono:o.mono});
+  const w = textW(t, s, fs), px = o.px || fs*.7, h = fs*1.75;
+  const at = {x:x - w/2 - px, y:y - h/2, width:w + 2*px, height:h, rx:o.rx ?? h/2, fill:o.fill||C.panel2, stroke:o.stroke||'none', 'stroke-width':o.sw||3};
+  for (const k in at) r.setAttribute(k, at[k]);
+  g.text = t; return g;
+}
+function Crown(p, s = 1){
+  const g = el('g', {}, p); const k = el('g', {transform:`scale(${s})`}, g);
+  el('path', {d:'M-28 14 L-30 -12 L-14 1 L0 -21 L14 1 L30 -12 L28 14 Z', fill:C.gold, stroke:'#a16207', 'stroke-width':2.5, 'stroke-linejoin':'round'}, k);
+  el('rect', {x:-28, y:16, width:56, height:9, rx:3, fill:C.gold, stroke:'#a16207', 'stroke-width':2}, k);
+  [[-30,-12],[0,-21],[30,-12]].forEach(([x,y]) => el('circle', {cx:x, cy:y, r:5, fill:C.gold, stroke:'#a16207', 'stroke-width':2}, k));
+  return g;
+}
+function Client(p, x, y, o = {}){
+  const g = el('g', {transform:`translate(${x} ${y})`}, p);
+  el('rect', {x:-75, y:-58, width:150, height:100, rx:10, fill:'#1e293b', stroke:'#cbd5e1', 'stroke-width':5}, g);
+  el('rect', {x:-60, y:-44, width:120, height:72, rx:4, fill:'#334155'}, g);
+  el('path', {d:'M-100 48 H100 L114 66 H-114 Z', fill:'#cbd5e1'}, g);
+  if (!o.nolabel) T(g, 0, 108, 'Client', {fs:30, fw:700, anchor:'middle'});
+  return g;
+}
+function Doc(p, w, h, label, o = {}){
+  const g = el('g', {}, p); const x = -w/2, y = -h/2, f = Math.min(w, h)*.26;
+  el('path', {d:`M${x} ${y} H${x+w-f} L${x+w} ${y+f} V${y+h} H${x} Z`, fill:o.ghost?'rgba(15,23,42,.6)':C.paper, stroke:o.ghost?C.paper:'#94a3b8', 'stroke-width':o.ghost?4:2, 'stroke-dasharray':o.ghost?'10 7':'none'}, g);
+  el('path', {d:`M${x+w-f} ${y} V${y+f} H${x+w}`, fill:'none', stroke:'#94a3b8', 'stroke-width':2}, g);
+  if (label) T(g, 0, o.ly ?? (y + h*.4), label, {fs:o.fs||24, fw:800, fill:o.ghost?C.paper:C.ink, anchor:'middle', mono:true});
+  const n = o.lines ?? 3;
+  for (let i = 0; i < n; i++) el('rect', {x:x + w*.16, y:y + h*.56 + i*h*.12, width:w*.68, height:Math.max(3, h*.05), rx:2, fill:o.ghost?C.muted:'#94a3b8'}, g);
+  return g;
+}
+function Check(p, x, y, r = 18, col = '#16a34a'){
+  const g = el('g', {transform:`translate(${x} ${y})`}, p);
+  el('circle', {r, fill:col, stroke:'#fff', 'stroke-width':3}, g);
+  el('path', {d:`M${-r*.45} ${r*.02} L${-r*.1} ${r*.36} L${r*.5} ${-r*.34}`, fill:'none', stroke:'#fff', 'stroke-width':r*.24, 'stroke-linecap':'round', 'stroke-linejoin':'round'}, g);
+  return g;
+}
+function Cross(p, x, y, r = 18){
+  const g = el('g', {transform:`translate(${x} ${y})`}, p);
+  el('circle', {r, fill:C.fail, stroke:'#fff', 'stroke-width':3}, g);
+  const k = r*.38; el('path', {d:`M${-k} ${-k} L${k} ${k} M${k} ${-k} L${-k} ${k}`, stroke:'#fff', 'stroke-width':r*.24, 'stroke-linecap':'round'}, g);
+  return g;
+}
+function NodeBox(p, top, N){
+  const {x, y, w, h} = N; const g = el('g', {}, p);
+  const r = el('rect', {x, y, width:w, height:h, rx:30, fill:C.node, stroke:C.nodeStroke, 'stroke-width':4}, g);
+  T(g, x + 28, y + 48, N.label, {fs:N.fs||34, fw:800});
+  const fx = el('g', {}, top || g); const m = 36;
+  el('path', {d:`M${x+m} ${y+m} L${x+w-m} ${y+h-m} M${x+w-m} ${y+m} L${x+m} ${y+h-m}`, stroke:C.fail, 'stroke-width':10, 'stroke-linecap':'round', opacity:.7}, fx);
+  Tag(fx, x + w/2, y + h/2, 'FAILED', {fill:C.fail, color:'#fff', fs:34, fw:800});
+  op(fx, 0);
+  return Object.assign({}, N, {cx:x + w/2, cy:y + h/2, g, r, fx,
+    set(o = 1, f = 0){ op(g, o); r.setAttribute('stroke', mix(C.nodeStroke, C.fail, f)); r.setAttribute('fill', mix(C.node, '#3b1219', f)); r.setAttribute('stroke-width', 4 + 3*f); op(fx, f*o); }});
+}
+function Shard(p, o){
+  const w = o.w || 140, h = o.h || 100, fs = o.fs || 40; const g = el('g', {}, p);
+  const ring = el('rect', {x:-w/2-12, y:-h/2-12, width:w+24, height:h+24, rx:24, fill:'none', stroke:o.ring||C.req, 'stroke-width':6}, g);
+  const rg = el('g', {}, g);
+  el('rect', {x:-w/2+2.5, y:-h/2+2.5, width:w-5, height:h-5, rx:15, fill:C.blueTint, stroke:C.blue, 'stroke-width':5}, rg);
+  T(rg, 0, fs*.36, o.r || '', {fs, fw:800, fill:C.blue, anchor:'middle'});
+  const pg = el('g', {}, g);
+  el('rect', {x:-w/2, y:-h/2, width:w, height:h, rx:16, fill:C.green}, pg);
+  T(pg, 0, fs*.36, o.p || '', {fs, fw:800, fill:C.greenDark, anchor:'middle'});
+  const dg = el('g', {}, g);
+  el('rect', {x:-w/2, y:-h/2, width:w, height:h, rx:16, fill:'#334155', stroke:'#475569', 'stroke-width':3}, dg);
+  T(dg, 0, fs*.36, o.kind === 'P' ? o.p : o.r, {fs, fw:800, fill:'#64748b', anchor:'middle'});
+  const S = {g, w, h, x:o.x || 0, y:o.y || 0, k:o.kind === 'P' ? 1 : 0,
+    set(x = S.x, y = S.y, s = 1, a = 1, k = S.k, rg_ = 0, dead = 0){ tr(g, x, y, s); op(g, a); op(pg, k); op(rg, k >= .999 ? 0 : 1); op(ring, rg_); op(dg, dead); }};
+  S.set(); return S;
+}
+/* a request/response arrow that draws itself along a path, with a travelling dot and a numbered badge */
+function Flow(p, d, o = {}){
+  const color = o.color || C.req; const g = el('g', {}, p);
+  const path = el('path', {d, fill:'none', stroke:color, 'stroke-width':o.w || 6, 'stroke-linecap':'round'}, g);
+  const len = path.getTotalLength(); path.setAttribute('stroke-dasharray', len + ' ' + len);
+  const e1 = path.getPointAtLength(len), e0 = path.getPointAtLength(Math.max(0, len - 5));
+  const ang = Math.atan2(e1.y - e0.y, e1.x - e0.x)*180/Math.PI;
+  const head = el('polygon', {points:'6,0 -20,-13 -20,13', fill:color, transform:`translate(${e1.x} ${e1.y}) rotate(${ang})`}, g);
+  let badge = null;
+  if (o.num != null){
+    const m = path.getPointAtLength(len*(o.numAt ?? .5));
+    badge = el('g', {transform:`translate(${m.x + (o.nx || 0)} ${m.y + (o.ny || 0)})`}, g);
+    el('circle', {r:25, fill:color, stroke:C.bg, 'stroke-width':5}, badge);
+    T(badge, 0, 10, String(o.num), {fs:29, fw:800, fill:C.ink, anchor:'middle'});
+  }
+  const pk = el('g', {}, p);
+  el('circle', {r:24, fill:color, opacity:.28}, pk);
+  el('circle', {r:14, fill:color, stroke:'#fff', 'stroke-width':3}, pk);
+  if (o.label) Tag(pk, 0, -46, o.label, {fs:22, fill:'#0b1224', color, stroke:color, sw:2});
+  const F = {g, path, len, head, badge, pk,
+    pt(q){ return path.getPointAtLength(len*clamp(q)); },
+    set(q, lineO, pkO){ path.setAttribute('stroke-dashoffset', len*(1 - q)); op(g, lineO); op(head, q > .97 ? 1 : 0);
+      if (badge) op(badge, clamp(q*4)); const pt = path.getPointAtLength(len*q); tr(pk, pt.x, pt.y); op(pk, pkO); }};
+  F.set(0, 0, 0); return F;
+}
+function run(f, t, a, b, dim = 1e9, keep = .22){
+  const q = P(t, a, b); const lo = t < a ? 0 : lerp(1, keep, P(t, dim, dim + .6));
+  f.set(q, lo, (t >= a && t <= b + .12) ? 1 : 0);
+}
+function Dot(p, color){ const g = el('g', {}, p); el('circle', {r:20, fill:color, opacity:.28}, g); el('circle', {r:12, fill:color, stroke:'#fff', 'stroke-width':3}, g); op(g, 0); return g; }
+function dotOn(dot, f, q, show){ const pt = f.pt(q); tr(dot, pt.x, pt.y); op(dot, show ? 1 : 0); }
+function Arrow(p, x1, y1, x2, y2, color, w = 6){
+  const g = el('g', {}, p); const a = Math.atan2(y2 - y1, x2 - x1);
+  el('line', {x1, y1, x2:x2 - Math.cos(a)*14, y2:y2 - Math.sin(a)*14, stroke:color, 'stroke-width':w, 'stroke-linecap':'round'}, g);
+  el('polygon', {points:'6,0 -18,-12 -18,12', fill:color, transform:`translate(${x2} ${y2}) rotate(${a*180/Math.PI})`}, g);
+  return g;
+}
+function Panel(p, x, y, w, h, title){
+  const g = el('g', {}, p);
+  const r = el('rect', {x, y, width:w, height:h, rx:22, fill:C.panel, stroke:C.line, 'stroke-width':3}, g);
+  if (title) T(g, x + 24, y + 40, title, {fs:25, fw:800, fill:C.muted});
+  g.r = r; return g;
+}
+function buildLegend(p){
+  const cols = [0, 200, 400, 600], rows = [0, 46];
+  const it = (c, r, draw, label) => { const g = el('g', {transform:`translate(${cols[c]} ${rows[r]})`}, p); draw(g); T(g, 56, 9, label, {fs:24, fw:600}); };
+  it(0, 0, g => el('rect', {x:0, y:-15, width:44, height:30, rx:7, fill:C.green}, g), 'Primary');
+  it(1, 0, g => el('rect', {x:2, y:-13, width:40, height:26, rx:7, fill:C.blueTint, stroke:C.blue, 'stroke-width':4}, g), 'Replica');
+  it(2, 0, g => el('rect', {x:0, y:-16, width:44, height:32, rx:10, fill:C.node, stroke:C.nodeStroke, 'stroke-width':3}, g), 'Node');
+  it(3, 0, g => { const c = Crown(g, .62); tr(c, 22, 1); }, 'Master');
+  it(0, 1, g => { const c = Client(g, 0, 0, {nolabel:true}); c.setAttribute('transform', 'translate(22 -3) scale(.2)'); }, 'Client');
+  it(1, 1, g => el('circle', {cx:22, cy:0, r:12, fill:C.req, stroke:'#fff', 'stroke-width':2.5}, g), 'Request');
+  it(2, 1, g => el('circle', {cx:22, cy:0, r:12, fill:C.ack, stroke:'#fff', 'stroke-width':2.5}, g), 'Response');
+  it(3, 1, g => { el('rect', {x:0, y:-15, width:44, height:30, rx:7, fill:'#3b1219', stroke:C.fail, 'stroke-width':3}, g);
+    el('path', {d:'M12 -7 L32 7 M32 -7 L12 7', stroke:C.fail, 'stroke-width':4, 'stroke-linecap':'round'}, g); }, 'Failed');
+}
+
+/* ===== shared 3-node cluster layout (scenes 5-8) ===== */
+const N1 = {x:520, y:360, w:380, h:240, label:'Node 1'};
+const N2 = {x:1240, y:160, w:380, h:240, label:'Node 2'};
+const N3 = {x:1240, y:590, w:380, h:240, label:'Node 3'};
+const slot = (N, k) => ({x:N.x + (k ? 275 : 105), y:N.y + 145});
+const crownPos = N => ({x:N.x + N.w - 52, y:N.y + 42});
+function buildCluster(g){
+  const frame = el('g', {}, g);
+  el('rect', {x:460, y:122, width:1230, height:752, rx:36, fill:'rgba(148,163,184,0.04)', stroke:C.line, 'stroke-width':3, 'stroke-dasharray':'14 10'}, frame);
+  T(frame, 490, 166, 'Cluster', {fs:28, fill:C.muted, fw:700});
+  const lyN = el('g', {}, g), lyS = el('g', {}, g), lyF = el('g', {}, g), lyO = el('g', {}, g), lyT = el('g', {}, g);
+  const n = [N1, N2, N3].map(N => NodeBox(lyN, lyO, N));
+  const mk = (N, k, kind, id) => { const q = slot(N, k); return Shard(lyS, {x:q.x, y:q.y, kind, p:'P' + id, r:'R' + id}); };
+  const s = {R0a:mk(N1,0,'R',0), P1a:mk(N1,1,'P',1), R0b:mk(N2,0,'R',0), R1b:mk(N2,1,'R',1), P0c:mk(N3,0,'P',0), R1c:mk(N3,1,'R',1)};
+  const crown = Crown(lyT, .95); const cp = crownPos(N1); tr(crown, cp.x, cp.y);
+  return {frame, n, s, crown, lyF, lyT, lyS, lyN, lyO};
+}
+
+/* ================= scenes ================= */
+const SC = [];
+
+/* ---------- 1. Index and shards ---------- */
+SC.push({title:'Index and shards', dur:30, legendFrom:4.9,
+cap:[[0,'Our color code. These colors mean the same thing in every scene.'],
+     [5,'Meet an index: a collection of documents, like a big table full of rows.'],
+     [9.5,'Shards are horizontal slices of an index.'],
+     [17.5,'Every shard holds whole documents, never pieces of a document.'],
+     [22.5,'Each shard is an independent unit: it can live on any node, and can even move to another node.']],
+build(g){
+  const lyNodes = el('g', {}, g);
+  const NN = [{x:60,y:300,w:580,h:330,label:'Node 1'},{x:670,y:300,w:580,h:330,label:'Node 2'},{x:1280,y:300,w:580,h:330,label:'Node 3'}].map(N => NodeBox(lyNodes, lyNodes, N));
+  const idx = el('g', {}, g);
+  el('rect', {x:740, y:138, width:440, height:722, rx:26, fill:'rgba(148,163,184,0.06)', stroke:C.paper, 'stroke-width':3}, idx);
+  const idxLab = T(g, 960, 186, 'Index: products', {fs:32, fw:800, anchor:'middle'});
+  const shards = [];
+  for (let i = 0; i < 4; i++){
+    const sg = el('g', {}, g); const fr = el('g', {}, sg);
+    el('rect', {x:-180, y:-115, width:360, height:230, rx:18, fill:C.greenTint, stroke:C.green, 'stroke-width':5}, fr);
+    el('path', {d:'M-180 -67 V-97 a18 18 0 0 1 18 -18 H162 a18 18 0 0 1 18 18 V-67 Z', fill:C.green}, fr);
+    T(fr, 0, -80, 'Shard ' + 'ABCD'[i], {fs:30, fw:800, fill:C.greenDark, anchor:'middle'});
+    const rows = [];
+    for (let j = 0; j < 3; j++){
+      const rg = el('g', {transform:`translate(-165 ${-59 + j*52})`}, sg);
+      el('rect', {width:330, height:44, rx:8, fill:C.paper}, rg);
+      el('path', {d:'M14 7 h15 l7 7 v23 h-22 z', fill:'#94a3b8'}, rg);
+      T(rg, 52, 30, `{ "_id": ${i*3 + j + 1}, … }`, {fs:23, mono:true, fill:C.ink, fw:700});
+      rows.push(rg);
+    }
+    const ring = el('rect', {x:-176, y:-13, width:352, height:56, rx:12, fill:'none', stroke:C.req, 'stroke-width':5}, sg);
+    shards.push({sg, fr, rows, ring});
+  }
+  const cuts = [1,2,3].map(k => el('line', {x1:715, y1:211 + 156*k, x2:715, y2:211 + 156*k, stroke:C.req, 'stroke-width':5, 'stroke-dasharray':'18 10'}, g));
+  const good = el('g', {}, g); Tag(good, 730, 598, '✓ one whole document', {fill:'#14532d', color:'#bbf7d0', fs:28});
+  const bad = el('g', {}, g);
+  const bh = el('g', {transform:'translate(1310 590)'}, bad);
+  el('path', {d:'M0 0 H88 L78 22 L94 44 L80 66 L92 88 L84 110 H0 Z', fill:C.paper}, bh);
+  el('path', {d:'M128 0 H210 V110 H124 L116 88 L130 66 L112 44 L126 22 Z', fill:C.paper}, bh);
+  T(bh, 44, 64, 'C', {fs:30, fw:800, fill:C.ink, anchor:'middle'}); T(bh, 168, 64, 'D', {fs:30, fw:800, fill:C.ink, anchor:'middle'});
+  Cross(bad, 1415, 645, 30);
+  Tag(bad, 1415, 752, '✗ a document is never split across shards', {fill:'#450a0a', color:'#fecaca', fs:26});
+  // big legend that flies into the header
+  const lg = el('g', {}, g); const deco = el('g', {}, lg);
+  el('rect', {x:-40, y:-80, width:850, height:180, rx:24, fill:C.panel, stroke:C.line, 'stroke-width':2}, deco);
+  T(deco, 385, -36, 'Color code', {fs:28, fw:800, anchor:'middle', fill:C.muted});
+  buildLegend(lg);
+  return t => {
+    const m = P(t, 3.4, 4.9);
+    tr(lg, lerp(960 - 385*1.6, 1120, m), lerp(500 - 23*1.6, 32, m), lerp(1.6, 1, m));
+    op(lg, P(t, .1, .7)*(t < 4.95 ? 1 : 0)); op(deco, 1 - P(t, 3.1, 3.8));
+    op(idx, P(t, 5, 5.8)*(1 - P(t, 12.3, 13.6))); op(idxLab, P(t, 5, 5.8)*(1 - P(t, 10.6, 11.1)));
+    const split = P(t, 11, 12.4), mv = P(t, 13, 16.5), nd = P(t, 22.6, 25.2), rl = P(t, 26.6, 29);
+    const fin = [[211,485],[960,485],[489,485],[1570,485]];
+    shards.forEach((S, i) => {
+      let x = 960, y = 274 + 156*i + (i - 1.5)*30*split;
+      x = lerp(x, 270 + 460*i, mv); y = lerp(y, 430, mv);
+      x = lerp(x, fin[i][0], nd); y = lerp(y, fin[i][1], nd);
+      if (i === 2){ x = lerp(x, 1709, rl); y -= Math.sin(Math.PI*rl)*230; }
+      if (i === 3) x = lerp(x, 1431, rl);
+      tr(S.sg, x, y, lerp(1, .7, nd));
+      op(S.fr, P(t, 14.6, 16.6));
+      S.rows.forEach((r, j) => op(r, P(t, 5.3 + (i*3 + j)*.13, 5.7 + (i*3 + j)*.13)));
+      op(S.ring, i === 1 ? win(t, 17.8, 22.4) : 0);
+    });
+    cuts.forEach((c, k) => { const cy = 211 + 156*(k + 1) + (k - 1)*30*split; c.setAttribute('y1', cy); c.setAttribute('y2', cy); c.setAttribute('x2', lerp(715, 1205, P(t, 9.8 + k*.45, 10.6 + k*.45))); op(c, (t > 9.8 + k*.45 ? 1 : 0)*(1 - P(t, 12.4, 13))); });
+    op(good, win(t, 18, 22.4)); op(bad, win(t, 19.2, 22.4));
+    NN.forEach(n => n.set(P(t, 22.6, 24)));
+  };
+}});
+
+/* ---------- 2. Inside a shard ---------- */
+SC.push({title:'Inside a shard', dur:40,
+cap:[[0,'Our index is split into shards A, B, C and D. Let\'s zoom into one of them.'],
+     [5,'What is a shard really made of?'],
+     [10.5,'Under the hood, every Elasticsearch shard is a complete Lucene index.'],
+     [14.5,'And a Lucene index is made of several smaller pieces called segments.'],
+     [19,'One Lucene index (one shard) can hold at most 2,147,483,519 documents.'],
+     [25,'A search inside a shard has to scan every segment, one by one.'],
+     [31.5,'So small segments are merged in the background into bigger ones: fewer segments, faster searches.']],
+build(g){
+  const H = ['Elasticsearch index', 'Shards', 'Lucene index', 'Segments'];
+  const hb = H.map((s, k) => {
+    const x = 100 + 440*k; const bg = el('g', {}, g);
+    const r = el('rect', {x, y:132, width:340, height:62, rx:31, fill:C.panel2, stroke:C.line, 'stroke-width':3}, bg);
+    const tx = T(bg, x + 170, 173, s, {fs:28, fw:700, anchor:'middle', fill:C.muted});
+    if (k < 3) el('path', {d:`M${x+380} 150 l18 13 l-18 13`, fill:'none', stroke:C.muted, 'stroke-width':5, 'stroke-linecap':'round', 'stroke-linejoin':'round'}, bg);
+    return {r, tx};
+  });
+  const idx = el('g', {}, g);
+  el('rect', {x:360, y:250, width:1200, height:600, rx:30, fill:'rgba(148,163,184,0.05)', stroke:C.paper, 'stroke-width':3}, idx);
+  T(idx, 390, 298, 'Index: products', {fs:32, fw:800});
+  const others = [1,2,3].map(k => { const sg = el('g', {}, g); const x = 420 + k*280;
+    el('rect', {x, y:350, width:240, height:400, rx:20, fill:C.green}, sg);
+    T(sg, x + 120, 563, 'Shard ' + 'ABCD'[k], {fs:38, fw:800, fill:C.greenDark, anchor:'middle'}); return sg; });
+  const aOut = el('rect', {fill:C.greenTint, stroke:C.green, 'stroke-width':5, rx:22}, g);
+  const aSolid = el('rect', {fill:C.green, rx:20}, g);
+  const aLab = T(g, 540, 563, 'Shard A', {fs:38, fw:800, fill:C.greenDark, anchor:'middle'});
+  const bigLab = T(g, 312, 296, 'Shard A  =  one Lucene index', {fs:36, fw:800, fill:'#86efac'});
+  const SW = [300,250,170,150,150], CNT = [8,6,3,1,1]; let sx = 398;
+  const segs = SW.map((w, k) => { const x = sx; sx += w + 26; const sg = el('g', {}, g);
+    const r = el('rect', {x, y:370, width:w, height:270, rx:14, fill:'#0d2818', stroke:'#4ade80', 'stroke-width':4}, sg);
+    T(sg, x + w/2, 408, 'Segment ' + (k + 1), {fs:22, fw:700, anchor:'middle', fill:'#bbf7d0'});
+    for (let j = 0; j < CNT[k]; j++) el('rect', {x:x + 18, y:428 + j*24, width:w - 36, height:14, rx:5, fill:C.paper, opacity:.85}, sg);
+    return {sg, r, x, w, cx:x + w/2}; });
+  const mc = (segs[3].cx + segs[4].cx)/2;
+  const merged = el('g', {}, g);
+  el('rect', {x:mc - 100, y:370, width:200, height:270, rx:14, fill:'#0d2818', stroke:'#4ade80', 'stroke-width':6}, merged);
+  T(merged, mc, 408, 'Segment 6', {fs:22, fw:700, anchor:'middle', fill:'#bbf7d0'});
+  for (let j = 0; j < 2; j++) el('rect', {x:mc - 82, y:428 + j*24, width:164, height:14, rx:5, fill:C.paper, opacity:.85}, merged);
+  const mTag = el('g', {}, g); Tag(mTag, mc, 336, 'merged in the background', {fs:24, fill:'#14532d', color:'#bbf7d0'});
+  const lim = el('g', {}, g);
+  el('rect', {x:420, y:675, width:1080, height:150, rx:20, fill:C.panel, stroke:C.req, 'stroke-width':3}, lim);
+  T(lim, 960, 722, 'Max documents in one Lucene index (= one shard)', {fs:30, fw:700, anchor:'middle', fill:C.muted});
+  const num = T(lim, 960, 795, '0', {fs:54, fw:800, anchor:'middle', mono:true, fill:C.req});
+  const mag = el('g', {}, g);
+  el('circle', {r:40, fill:'rgba(245,158,11,0.15)', stroke:C.req, 'stroke-width':9}, mag);
+  el('line', {x1:29, y1:29, x2:62, y2:62, stroke:C.req, 'stroke-width':13, 'stroke-linecap':'round'}, mag);
+  return t => {
+    const act = t < 5 ? 0 : t < 10.5 ? 1 : t < 14.5 ? 2 : 3;
+    hb.forEach((h, k) => { h.r.setAttribute('stroke', k === act ? C.req : C.line); h.r.setAttribute('fill', k === act ? 'rgba(245,158,11,0.18)' : C.panel2);
+      h.tx.setAttribute('fill', k <= act ? C.text : C.muted); });
+    const z = P(t, 10.5, 13.2);
+    const R = {x:lerp(420, 280, z), y:lerp(350, 240, z), width:lerp(240, 1360, z), height:lerp(400, 620, z)};
+    for (const k in R){ aOut.setAttribute(k, R[k]); aSolid.setAttribute(k, R[k]); }
+    op(aSolid, 1 - P(t, 11.2, 13.2)); op(aLab, 1 - P(t, 10.6, 11.2)); op(bigLab, P(t, 12.6, 13.4));
+    op(idx, 1 - P(t, 10.5, 11.5)); others.forEach(o => op(o, (1 - P(t, 10.5, 11.3))*(1 - .55*win(t, 5.2, 10.4))));
+    op(aOut, t > 10.5 ? 1 : 0);
+    // pulse the shards while "Shards" is the active level
+    const pz = 1 + .03*Math.sin(Math.max(0, t - 5)*5)*win(t, 5.2, 10.4);
+    tr(aLab, 0, 0); aSolid.setAttribute('transform', `translate(${540*(1-pz)} ${550*(1-pz)}) scale(${pz})`);
+    // segments + scan + merge
+    const sf = clamp((t - 25.4)/1.05, 0, 4.6), si = Math.min(4, Math.floor(sf)), sl = sf - si;
+    segs.forEach((s, k) => {
+      let dx = 0; if (k >= 3){ const mg = P(t, 32, 33.8); dx = (mc - s.cx)*mg; }
+      tr(s.sg, dx, 0);
+      op(s.sg, P(t, 14.8 + k*.4, 15.4 + k*.4)*(k >= 3 ? 1 - P(t, 33.6, 34.2) : 1));
+      const lit = t > 25.4 && t < 31.4 && k <= si;
+      s.r.setAttribute('stroke', lit ? C.req : '#4ade80'); s.r.setAttribute('stroke-width', lit ? 7 : 4);
+    });
+    op(merged, P(t, 33.6, 34.4)); op(mTag, P(t, 34, 34.6));
+    op(lim, P(t, 19.2, 19.8));
+    num.textContent = Math.round(2147483519*P(t, 19.5, 22.6)).toLocaleString('en-US');
+    const xs = segs.map(s => s.cx);
+    const mx = (si < 4 && sl > .55) ? lerp(xs[si], xs[si + 1], ease((sl - .55)/.45)) : xs[si];
+    tr(mag, mx - 10, 520); op(mag, win(t, 25.2, 31.4));
+  };
+}});
+
+/* ---------- 3. Primary and replica ---------- */
+SC.push({title:'Primary and replica', dur:36,
+cap:[[0,'A cluster with two nodes: Node A and Node B.'],
+     [3,'Node A holds the primary shards P0 and P1.'],
+     [7,'Each primary gets a replica: an exact copy, placed on the other node.'],
+     [12.3,'Both copies hold the same data, so reads can be served by either one: extra read capacity.'],
+     [17.2,'A replica never lives on the same node as its primary. One crash would lose both copies.'],
+     [22.4,'Disaster: Node A fails, and its primaries P0 and P1 are gone.'],
+     [27,'The replicas on Node B are promoted to primary (blue becomes green). No data is lost.'],
+     [31.5,'Replicas give high availability and extra read capacity.']],
+build(g){
+  const fr = el('g', {}, g);
+  el('rect', {x:260, y:150, width:1400, height:700, rx:36, fill:'rgba(148,163,184,0.04)', stroke:C.line, 'stroke-width':3, 'stroke-dasharray':'14 10'}, fr);
+  T(fr, 290, 194, 'Cluster', {fs:28, fill:C.muted, fw:700});
+  const lyN = el('g', {}, g), lyS = el('g', {}, g), lyF = el('g', {}, g), lyO = el('g', {}, g);
+  const A = NodeBox(lyN, lyO, {x:320, y:230, w:580, h:540, label:'Node A', fs:38});
+  const B = NodeBox(lyN, lyO, {x:1020, y:230, w:580, h:540, label:'Node B', fs:38});
+  const sz = {w:160, h:112, fs:46};
+  const P0 = Shard(lyS, {...sz, kind:'P', p:'P0', r:'R0'}), P1 = Shard(lyS, {...sz, kind:'P', p:'P1', r:'R1'});
+  const R0 = Shard(lyS, {...sz, kind:'R', p:'P0', r:'R0'}), R1 = Shard(lyS, {...sz, kind:'R', p:'P1', r:'R1'});
+  const ghost = Shard(lyS, {...sz, kind:'R', p:'P0', r:'R0'});
+  const gX = el('g', {}, lyO); Cross(gX, 690, 590, 30); Tag(gX, 610, 700, '✗ never on the same node as its primary', {fill:'#450a0a', color:'#fecaca', fs:26});
+  const cl = Client(g, 130, 470);
+  const rdP = Flow(lyF, 'M 215 450 C 290 440 330 440 405 440', {label:'read'});
+  const rdR = Flow(lyF, 'M 190 400 C 380 120 1050 120 1190 368', {label:'read'});
+  const bP = Dot(lyF, C.ack), bR = Dot(lyF, C.ack);
+  const prom = el('g', {}, lyO); Tag(prom, 1310, 590, '✓ promoted to primary', {fill:'#14532d', color:'#bbf7d0', fs:30});
+  const copyTag = el('g', {}, lyO); Tag(copyTag, 1310, 590, 'exact copies', {fill:C.panel2, color:C.blue, stroke:C.blue, fs:28});
+  return t => {
+    op(fr, P(t, .1, .8)); A.set(P(t, .3, 1.2), P(t, 22.6, 23.6)); B.set(P(t, .5, 1.4));
+    const dead = P(t, 22.8, 23.8);
+    [[P0, 500, 3.2], [P1, 720, 3.6]].forEach(([s, x, a]) => s.set(x, 440, lerp(.4, 1, P(t, a, a + .6)), P(t, a, a + .4), 1, 0, dead));
+    [[R0, 500, 1200, 7.4], [R1, 720, 1420, 8.1]].forEach(([s, x0, x1, a], i) => {
+      const m = P(t, a, a + 2.2);
+      const k = P(t, 27.4 + i*.5, 28.6 + i*.5);
+      s.set(lerp(x0, x1, m), 440 - Math.sin(Math.PI*m)*130, 1, t > a ? 1 : 0, k, win(t, 27.2, 31.5));
+    });
+    ghost.set(610, 590, 1, .55*win(t, 17.4, 22.2));
+    op(gX, win(t, 17.9, 22.2));
+    op(cl, P(t, 11.8, 12.4)*(1 - .6*P(t, 22.4, 23.4)));
+    run(rdP, t, 12.6, 14.2, 16.4, 0); run(rdR, t, 12.6, 14.2, 16.4, 0);
+    const bq = P(t, 14.5, 16); dotOn(bP, rdP, 1 - bq, t > 14.5 && t < 16.1); dotOn(bR, rdR, 1 - bq, t > 14.5 && t < 16.1);
+    op(copyTag, win(t, 9.8, 12.2)); op(prom, P(t, 28.8, 29.5));
+  };
+}});
+
+/* ---------- 4. How a document finds its shard ---------- */
+SC.push({title:'How a document finds its shard', dur:36,
+cap:[[0,'Every document has an _id. Elasticsearch uses it to decide which shard stores the document.'],
+     [4.4,'The _id goes into a hash function, which turns it into a number.'],
+     [9.3,'9 % 3 = 0, so the document with _id 42 is stored in Shard 0.'],
+     [13.6,'Same _id, same formula: the document always maps to the same shard. That is how it is found again.'],
+     [18.2,'What if we changed the index to 4 primary shards?'],
+     [22.6,'Looking up _id 42 now gives 9 % 4 = 1. Elasticsearch would look in Shard 1, but the document is in Shard 0!'],
+     [29.4,'That is why the number of primary shards cannot be changed after the index is created.']],
+build(g){
+  const ban = el('g', {}, g);
+  el('rect', {x:330, y:132, width:1260, height:80, rx:20, fill:C.panel, stroke:C.req, 'stroke-width':3}, ban);
+  T(ban, 960, 186, 'shard = hash(_id) % number_of_primary_shards', {fs:40, fw:700, anchor:'middle', mono:true, fill:C.text});
+  const n3 = el('g', {}, g); Tag(n3, 960, 258, 'number_of_primary_shards = 3', {fs:28, mono:true, fill:C.panel2, color:C.text});
+  const n4 = el('g', {}, g); Tag(n4, 960, 258, 'number_of_primary_shards = 4  (what if?)', {fs:28, mono:true, fill:'#450a0a', color:'#fecaca', stroke:C.fail});
+  const mach = el('g', {}, g);
+  const mr = el('rect', {x:610, y:420, width:300, height:200, rx:26, fill:C.panel2, stroke:C.req, 'stroke-width':5}, mach);
+  T(mach, 740, 535, 'hash( )', {fs:46, fw:800, anchor:'middle', mono:true});
+  const gear = el('g', {}, mach);
+  el('circle', {r:22, fill:'none', stroke:C.req, 'stroke-width':8, 'stroke-dasharray':'9 6'}, gear); el('circle', {r:7, fill:C.req}, gear);
+  const out1 = el('g', {}, g); T(out1, 760, 678, 'hash("42") = 9', {fs:36, fw:700, anchor:'middle', mono:true}); T(out1, 760, 712, '(example value)', {fs:22, anchor:'middle', fill:C.muted});
+  const out2 = el('g', {}, g); T(out2, 760, 770, '9 % 3 = 0', {fs:44, fw:800, anchor:'middle', mono:true, fill:C.req});
+  const out3 = el('g', {}, g); T(out3, 760, 770, '9 % 4 = 1', {fs:44, fw:800, anchor:'middle', mono:true, fill:'#fca5a5'});
+  const shards = [0,1,2,3].map(i => { const sg = el('g', {}, g);
+    const ring = el('rect', {x:-152, y:-72, width:304, height:144, rx:26, fill:'none', stroke:i === 0 ? C.green : C.fail, 'stroke-width':6}, sg);
+    if (i < 3) el('rect', {x:-140, y:-60, width:280, height:120, rx:18, fill:C.green}, sg);
+    else el('rect', {x:-140, y:-60, width:280, height:120, rx:18, fill:'none', stroke:C.green, 'stroke-width':4, 'stroke-dasharray':'12 8'}, sg);
+    T(sg, -40, 13, 'Shard ' + i, {fs:36, fw:800, anchor:'middle', fill:i < 3 ? C.greenDark : C.green});
+    return {sg, ring}; });
+  const doc = Doc(g, 170, 210, '_id: 42', {fs:28});
+  const ghost = Doc(g, 170, 210, 'GET 42', {fs:26, ghost:true});
+  const notHere = el('g', {}, g); Cross(notHere, 1050, 0, 26); Tag(notHere, 1200, 0, 'not here!', {fill:'#450a0a', color:'#fecaca', fs:30});
+  const isHere = el('g', {}, g); Tag(isHere, 1200, 0, 'doc 42 is here', {fill:'#14532d', color:'#bbf7d0', fs:30});
+  const lock = el('g', {}, g);
+  el('rect', {x:470, y:812, width:980, height:72, rx:20, fill:'#422006', stroke:C.req, 'stroke-width':3}, lock);
+  const lk = el('g', {transform:'translate(530 848)'}, lock);
+  el('path', {d:'M-14 -6 V-16 a14 14 0 0 1 28 0 V-6', fill:'none', stroke:C.gold, 'stroke-width':6}, lk);
+  el('rect', {x:-21, y:-8, width:42, height:32, rx:6, fill:C.gold}, lk);
+  T(lock, 990, 861, 'Primary shard count is fixed when the index is created', {fs:32, fw:800, anchor:'middle', fill:'#fde68a'});
+  return t => {
+    op(ban, P(t, .2, .9)); op(mach, P(t, .6, 1.3));
+    const sw = P(t, 18.3, 20);
+    op(n3, P(t, 1, 1.6)*(1 - sw)); op(n4, sw);
+    const ys = i => i < 3 ? lerp([380,530,680][i], [330,460,590][i], sw) : 720;
+    shards.forEach((s, i) => { tr(s.sg, 1480, ys(i)); op(s.sg, i < 3 ? P(t, 1 + i*.2, 1.6 + i*.2) : sw);
+      op(s.ring, i === 0 ? win(t, 9.6, 13.4) + win(t, 27.6, 33) : i === 1 ? win(t, 27.4, 33) : 0); });
+    const busy = (t > 6.2 && t < 9.4) || (t > 24.4 && t < 25.4);
+    mr.setAttribute('stroke-width', busy ? 5 + 4*Math.abs(Math.sin(t*6)) : 5);
+    tr(gear, 860, 470, 1, busy ? t*240 : 0);
+    op(out1, P(t, 7.6, 8.2)); op(out2, P(t, 9.3, 9.8)*(1 - P(t, 18.3, 18.8))); op(out3, P(t, 24.8, 25.3));
+    // the real document
+    if (t < 9.6){ const a = P(t, 4.5, 6.8); tr(doc, lerp(230, 760, a), 520, lerp(1, .35, a)); op(doc, P(t, .8, 1.4)*(1 - P(t, 6.3, 6.8))); }
+    else { const b = P(t, 9.6, 12); tr(doc, lerp(910, 1560, b), lerp(520, ys(0), b) - Math.sin(Math.PI*b)*60, lerp(.35, .3, b)); op(doc, 1); }
+    // the lookup after "resharding"
+    if (t < 25.2){ const a = P(t, 22.6, 24.4); tr(ghost, lerp(230, 760, a), 520, lerp(1, .35, a)); op(ghost, P(t, 22.4, 22.9)*(1 - P(t, 24, 24.4))); }
+    else { const b = P(t, 25.4, 27.4); tr(ghost, lerp(910, 1560, b), lerp(520, ys(1), b) - Math.sin(Math.PI*b)*60, .32); op(ghost, 1 - P(t, 33, 33.6)); }
+    tr(notHere, 0, ys(1)); op(notHere, win(t, 27.6, 33.4));
+    tr(isHere, 0, ys(0)); op(isHere, win(t, 28.2, 33.4));
+    op(lock, P(t, 29.6, 30.3));
+  };
+}});
+
+/* ---------- 5. Full example: 3 nodes ---------- */
+SC.push({title:'Full example: 3 nodes, 2 primaries, 2 replicas each', dur:40,
+cap:[[0,'A 3-node cluster. Node 1 is the master node (crown): it manages the cluster.'],
+     [4,'Our index has 2 primary shards: P0 lives on Node 3, P1 lives on Node 1.'],
+     [9,'With 2 replicas per primary, every shard has 3 copies: one primary and two replicas.'],
+     [16.8,'The copies are spread so that no node ever holds two copies of the same shard.'],
+     [23.2,'Node 1 fails! It held primary P1, and it was the master.'],
+     [27.8,'A replica of shard 1 on Node 2 is promoted to primary, and a new master is elected.'],
+     [33.5,'Both shards still have a primary, so the cluster keeps working.']],
+build(g){
+  const K = buildCluster(g); const s = K.s;
+  const pan = Panel(g, 40, 650, 400, 220, 'Copies per shard');
+  const L1 = el('g', {}, pan); T(L1, 64, 735, 'Shard 0 → Nodes 1, 2, 3', {fs:27, fw:700}); Check(L1, 405, 726, 16);
+  const L2 = el('g', {}, pan); T(L2, 64, 790, 'Shard 1 → Nodes 1, 2, 3', {fs:27, fw:700}); Check(L2, 405, 781, 16);
+  const L3 = el('g', {}, pan); T(L3, 64, 845, 'One copy per node', {fs:25, fw:600, fill:C.muted});
+  const pan2 = Panel(g, 40, 620, 400, 250, 'Cluster status');
+  [['Shard 0 primary: Node 3', 700], ['Shard 1 primary: Node 2', 755], ['Master: Node 2', 810]].forEach(([s_, y]) => { T(pan2, 64, y + 9, s_, {fs:26, fw:700}); Check(pan2, 405, y, 16); });
+  T(pan2, 64, 857, 'Cluster keeps working', {fs:25, fw:800, fill:'#86efac'});
+  const prom = el('g', {}, K.lyT); Tag(prom, 1515, 470, 'R1 → P1  promoted', {fill:'#14532d', color:'#bbf7d0', fs:26});
+  const mTag = el('g', {}, K.lyT); Tag(mTag, 1075, 205, 'new master elected', {fill:'#422006', color:'#fde68a', fs:24});
+  const c1 = crownPos(N1), c2 = crownPos(N2);
+  return t => {
+    op(K.frame, P(t, .1, .8)); const f1 = P(t, 23.4, 24.4);
+    K.n[0].set(P(t, .2, 1), f1); K.n[1].set(P(t, .4, 1.2)); K.n[2].set(P(t, .6, 1.4));
+    const sp = (q, a) => [lerp(.4, 1, P(t, a, a + .6)), P(t, a, a + .4)];
+    const ring0 = win(t, 17.2, 20.4), ring1 = win(t, 20.6, 23.2);
+    const q0 = slot(N3, 0), q1 = slot(N1, 1);
+    let [sc, a] = sp(0, 4.2); s.P0c.set(q0.x, q0.y, sc, a, 1, ring0);
+    [sc, a] = sp(0, 4.7); s.P1a.set(q1.x, q1.y, sc, a, 1, ring1, f1);
+    const fly = (S, from, to, a0, ring, k = 0, dead = 0) => { const m = P(t, a0, a0 + 2.2); S.set(lerp(from.x, to.x, m), lerp(from.y, to.y, m), 1, t > a0 ? 1 : 0, k, ring, dead); };
+    fly(s.R0a, q0, slot(N1, 0), 9.4, ring0, 0, f1); fly(s.R0b, q0, slot(N2, 0), 9.4, ring0);
+    fly(s.R1b, q1, slot(N2, 1), 12, ring1 + win(t, 28, 33.5), P(t, 28.2, 29.6)); fly(s.R1c, q1, slot(N3, 1), 12, ring1);
+    const cm = P(t, 28.6, 30.6);
+    tr(K.crown, lerp(c1.x, c2.x, cm), lerp(c1.y, c2.y, cm) - Math.sin(Math.PI*cm)*90, .95);
+    op(K.crown, P(t, 1.2, 1.8)*(1 - .65*f1*(1 - cm)));
+    op(prom, P(t, 29.6, 30.2)); op(mTag, P(t, 30.6, 31.2));
+    op(pan, P(t, 17.2, 17.7)*(1 - P(t, 33, 33.5))); op(L1, P(t, 17.6, 18.2)); op(L2, P(t, 20.8, 21.4)); op(L3, P(t, 21.4, 22));
+    op(pan2, P(t, 33.5, 34.1));
+  };
+}});
+
+/* ---------- 6. Writing one document ---------- */
+SC.push({title:'Writing one document (index / create / delete)', dur:45,
+cap:[[0,'Back to our healthy 3-node cluster. A client wants to index a document with _id 42.'],
+     [3.6,'(1) The client sends the request to any node, here Node 1. Node 1 becomes the coordinating node.'],
+     [8,'(2) Node 1 hashes the _id: the document belongs to shard 0. The primary of shard 0 is on Node 3, so Node 1 forwards the request there.'],
+     [14.6,'(3) Node 3 writes the document to the primary shard P0 first...'],
+     [18.6,'(3) ...then forwards the operation IN PARALLEL to the replicas of shard 0, on Node 1 and Node 2.'],
+     [25,'(4) Both replicas confirm to Node 3.'],
+     [29.4,'(4) Node 3 reports success to Node 1, and Node 1 reports success to the client.'],
+     [36.4,'Key point: the client gets its answer only AFTER the primary and all replicas were updated.']],
+build(g){
+  const K = buildCluster(g); const s = K.s, F = K.lyF;
+  const cl = Client(g, 150, 480);
+  const doc = Doc(g, 74, 92, '42', {fs:24, lines:2, ly:-6}); tr(doc, 150, 352);
+  const f1 = Flow(F, 'M 252 466 L 512 466', {num:1, label:'index _id 42', numAt:.5, ny:52});
+  const f2 = Flow(F, 'M 905 420 C 1060 400 1150 600 1268 698', {num:2, numAt:.42});
+  const f3a = Flow(F, 'M 1320 682 L 1320 362', {num:3, numAt:.5, nx:-36});
+  const f3b = Flow(F, 'M 1268 762 C 1060 860 760 760 655 562', {num:3, numAt:.45});
+  const a4a = Flow(F, 'M 1372 362 L 1372 682', {num:4, color:C.ack, w:5, numAt:.5, nx:36});
+  const a4b = Flow(F, 'M 600 562 C 640 880 1080 900 1268 792', {num:4, color:C.ack, w:5, numAt:.55});
+  const a4c = Flow(F, 'M 1268 728 C 1120 700 1040 500 905 470', {num:4, color:C.ack, w:5, numAt:.55});
+  const a4d = Flow(F, 'M 512 506 L 252 506', {num:4, color:C.ack, label:'success', numAt:.5, ny:42});
+  const coord = el('g', {}, K.lyT); Tag(coord, 710, 640, 'coordinating node', {fill:'#422006', color:'#fde68a', stroke:C.req, fs:26});
+  const hashB = el('g', {}, K.lyT); Tag(hashB, 690, 318, 'hash(42) % 2 = 0  →  shard 0', {fill:C.panel2, color:C.req, stroke:C.req, fs:26, mono:true});
+  const ok = [s.P0c, s.R0a, s.R0b].map(S => { const c = Check(K.lyT, 0, 0, 20); return {c, S}; });
+  const wait = T(g, 150, 640, '', {fs:28, fw:700, anchor:'middle', fill:C.muted});
+  const done = el('g', {}, g); Tag(done, 150, 632, '✓ success', {fill:'#14532d', color:'#bbf7d0', fs:28});
+  const pan = Panel(g, 30, 668, 450, 220, 'Before the client hears back:');
+  const items = ['P0 written (Node 3)', 'R0 written (Node 1)', 'R0 written (Node 2)'].map((s_, i) => {
+    const y = 742 + i*42; el('rect', {x:54, y:y - 16, width:30, height:30, rx:6, fill:'none', stroke:C.muted, 'stroke-width':3}, pan);
+    T(pan, 100, y + 9, s_, {fs:26, fw:700}); return Check(pan, 69, y - 1, 15); });
+  const only = T(pan, 54, 870, '→ only then: "success"', {fs:26, fw:800, fill:C.req});
+  return t => {
+    op(K.frame, P(t, 0, .6)); K.n.forEach(n => n.set(P(t, 0, .6)));
+    op(doc, P(t, .5, 1)*(1 - P(t, 3.4, 3.7)));
+    run(f1, t, 3.6, 6.2, 8); op(coord, P(t, 6.2, 6.8));
+    op(hashB, win(t, 8.2, 14.6));
+    s.P0c.set(undefined, undefined, 1, 1, 1, win(t, 9.4, 18.4) + .6*pulse(t, 14.8, 16.6));
+    run(f2, t, 10.8, 13.6, 15.2);
+    run(f3a, t, 18.8, 22, 24.4); run(f3b, t, 18.8, 22, 24.4);
+    s.R0a.set(undefined, undefined, 1, 1, 0, win(t, 18.8, 24.6)); s.R0b.set(undefined, undefined, 1, 1, 0, win(t, 18.8, 24.6));
+    ok.forEach(({c, S}, i) => { tr(c, S.x + 64, S.y - 46, i === 0 ? lerp(.3, 1, P(t, 16, 16.4)) : lerp(.3, 1, P(t, 22.2, 22.6))); op(c, i === 0 ? P(t, 16, 16.3) : P(t, 22.2, 22.5)); });
+    run(a4a, t, 25.2, 28.2, 29.6); run(a4b, t, 25.2, 28.2, 29.6);
+    run(a4c, t, 29.6, 32.2, 34.6); run(a4d, t, 32.6, 35);
+    const w = t > 3.6 && t < 35.1; wait.textContent = 'waiting' + '.'.repeat(1 + Math.floor(t*2.5) % 3); op(wait, w ? 1 : 0);
+    op(done, P(t, 35, 35.4));
+    op(pan, P(t, 14.8, 15.4)); op(items[0], P(t, 16.4, 16.7)); op(items[1], P(t, 22.6, 22.9)); op(items[2], P(t, 22.6, 22.9));
+    op(only, P(t, 36.4, 37)); pan.r.setAttribute('stroke', t > 36.4 ? C.req : C.line); pan.r.setAttribute('stroke-width', t > 36.4 ? 5 : 3);
+  };
+}});
+
+/* ---------- 7. Reading one document ---------- */
+SC.push({title:'Reading one document', dur:44,
+cap:[[0,'Now the client wants to read the document with _id 42.'],
+     [3.4,'(1) The client asks Node 1, which becomes the coordinating node.'],
+     [6.6,'(2) Node 1 hashes the _id: shard 0. Shard 0 has a copy on all three nodes, and ANY of them can answer.'],
+     [11,'(2) This time Node 1 picks the copy on Node 2 and asks it for the document.'],
+     [14,'(3) Node 2 returns the document to Node 1...'],
+     [16.8,'(4) ...and Node 1 returns it to the client.'],
+     [22.4,'Same request again. This time Node 1 picks a different copy: P0 on Node 3. Load is balanced round-robin.'],
+     [34.6,'Writes must go through the primary. Reads can be served by ANY copy.']],
+build(g){
+  const K = buildCluster(g); const s = K.s, F = K.lyF;
+  const cl = Client(g, 150, 480);
+  const getT = el('g', {}, g); Tag(getT, 150, 372, 'GET _id 42', {fs:24, mono:true, fill:C.panel2, color:C.req, stroke:C.req});
+  const mk = () => ({
+    a:Flow(F, 'M 252 466 L 512 466', {num:1, numAt:.5, ny:52}),
+    d:Flow(F, 'M 512 506 L 252 506', {num:4, color:C.ack, label:'doc 42', numAt:.5, ny:42})});
+  const R1 = mk(), R2 = mk();
+  R1.b = Flow(F, 'M 800 356 C 860 236 1080 240 1268 288', {num:2, numAt:.5});
+  R1.c = Flow(F, 'M 1268 324 C 1120 336 960 330 868 362', {num:3, color:C.ack, w:5, numAt:.55, ny:30});
+  R2.b = Flow(F, 'M 905 420 C 1060 400 1150 600 1268 698', {num:2, numAt:.42});
+  R2.c = Flow(F, 'M 1268 728 C 1120 700 1040 500 905 470', {num:3, color:C.ack, w:5, numAt:.55});
+  const coord = el('g', {}, K.lyT); Tag(coord, 710, 640, 'coordinating node', {fill:'#422006', color:'#fde68a', stroke:C.req, fs:26});
+  const hashB = el('g', {}, K.lyT); Tag(hashB, 690, 318, 'hash(42) % 2 = 0  →  shard 0', {fill:C.panel2, color:C.req, stroke:C.req, fs:26, mono:true});
+  const pan = Panel(g, 30, 668, 450, 214, 'Copies of shard 0');
+  const chips = ['Node 1', 'Node 2', 'Node 3'].map((s_, i) => { const x = 105 + i*150;
+    const r = el('rect', {x:x - 65, y:722, width:130, height:52, rx:14, fill:C.panel2, stroke:C.line, 'stroke-width':3}, pan);
+    T(pan, x, 757, s_, {fs:24, fw:700, anchor:'middle'}); return r; });
+  const ptr = el('polygon', {points:'0,0 -14,22 14,22', fill:C.req}, pan);
+  const req1 = T(pan, 255, 845, 'request #1 → Node 2', {fs:26, fw:800, anchor:'middle', fill:C.req});
+  const req2 = T(pan, 255, 845, 'request #2 → Node 3', {fs:26, fw:800, anchor:'middle', fill:C.req});
+  const got = el('g', {}, g); Tag(got, 150, 632, '✓ got doc 42', {fill:'#14532d', color:'#bbf7d0', fs:28});
+  // contrast overlay
+  const ov = el('g', {}, g);
+  el('rect', {x:0, y:110, width:1920, height:790, fill:C.bg, opacity:.95}, ov);
+  const card = (x, title, sub, col) => { el('rect', {x, y:170, width:740, height:680, rx:30, fill:C.panel, stroke:col, 'stroke-width':5}, ov);
+    T(ov, x + 370, 262, title, {fs:64, fw:900, anchor:'middle', fill:col}); T(ov, x + 370, 322, sub, {fs:34, fw:700, anchor:'middle'}); };
+  card(170, 'WRITE', 'must go through the PRIMARY', C.req);
+  card(1010, 'READ', 'ANY copy can answer', C.ack);
+  const mini = (x, y, kind, id) => Shard(ov, {x, y, kind, p:'P' + id, r:'R' + id, w:130, h:90, fs:38});
+  mini(520, 560, 'P', 0); mini(760, 440, 'R', 0); mini(760, 680, 'R', 0);
+  Arrow(ov, 250, 560, 445, 560, C.req, 7); Arrow(ov, 590, 530, 685, 460, C.req, 6); Arrow(ov, 590, 590, 685, 660, C.req, 6);
+  T(ov, 330, 520, 'write', {fs:26, fw:700, anchor:'middle', fill:C.muted});
+  T(ov, 540, 800, 'primary first, then all replicas', {fs:28, fw:700, anchor:'middle', fill:C.muted});
+  mini(1560, 420, 'P', 0); mini(1560, 560, 'R', 0); mini(1560, 700, 'R', 0);
+  Arrow(ov, 1130, 560, 1485, 425, C.ack, 6); Arrow(ov, 1130, 560, 1485, 560, C.ack, 6); Arrow(ov, 1130, 560, 1485, 695, C.ack, 6);
+  el('circle', {cx:1120, cy:560, r:14, fill:C.ack, stroke:'#fff', 'stroke-width':3}, ov);
+  T(ov, 1380, 800, 'pick one: P0 or any R0', {fs:28, fw:700, anchor:'middle', fill:C.muted});
+  return t => {
+    op(K.frame, P(t, 0, .6)); K.n.forEach(n => n.set(P(t, 0, .6)));
+    op(getT, P(t, .6, 1.1)*(1 - P(t, 33.6, 34))); op(coord, P(t, 5.8, 6.4));
+    op(hashB, win(t, 6.8, 11) + win(t, 25.8, 27.6));
+    const rings = win(t, 7.8, 11.2) + win(t, 26, 27.4);
+    s.R0a.set(undefined, undefined, 1, 1, 0, rings); s.R0b.set(undefined, undefined, 1, 1, 0, rings + win(t, 11, 16.4)); s.P0c.set(undefined, undefined, 1, 1, 1, rings + win(t, 27.2, 31.6));
+    run(R1.a, t, 3.4, 5.8, 22.4, 0); run(R1.b, t, 11, 13.6, 22.4, 0); run(R1.c, t, 14, 16.4, 22.4, 0); run(R1.d, t, 16.8, 19.2, 22.4, 0);
+    run(R2.a, t, 24, 25.8, 34); run(R2.b, t, 27.4, 29.4, 34); run(R2.c, t, 29.6, 31.6, 34); run(R2.d, t, 31.8, 33.6, 34.2);
+    op(pan, P(t, 8.4, 9)); const pi = lerp(1, 2, P(t, 26.2, 27.2));
+    tr(ptr, 105 + pi*150, 786); op(ptr, P(t, 10.2, 10.6));
+    chips.forEach((r, i) => { const on = (i === 1 && t > 10.2 && t < 26.4) || (i === 2 && t > 26.8); r.setAttribute('stroke', on ? C.req : C.line); r.setAttribute('fill', on ? 'rgba(245,158,11,0.2)' : C.panel2); });
+    op(req1, P(t, 10.4, 10.8)*(1 - P(t, 26, 26.4))); op(req2, P(t, 26.6, 27));
+    op(got, win(t, 19.2, 23.6) + win(t, 33.6, 35.2));
+    op(ov, P(t, 34.8, 35.6));
+  };
+}});
+
+/* ---------- 8. Bulk request ---------- */
+SC.push({title:'Bulk request (many documents at once)', dur:45,
+cap:[[0,'The client has 6 documents to index. Instead of 6 separate requests, it sends ONE bulk request.'],
+     [4,'(1) The whole bulk request travels to Node 1, the coordinating node.'],
+     [7.6,'(2) Node 1 hashes each _id and splits the bulk into one smaller bulk request per shard.'],
+     [12.6,'(3) The per-shard requests go out IN PARALLEL to the primaries: P0 on Node 3, and P1 on Node 1 itself.'],
+     [16.8,'(4) Each primary executes its actions one after another (serially) and replicates each one to its replicas in parallel.'],
+     [29.8,'(5) When all replicas have reported success, the results are collected by Node 1.'],
+     [33.2,'(6) Node 1 returns all 6 results to the client in a single response.'],
+     [37,'One network round trip for many documents. That is why bulk indexing is so much faster.']],
+build(g){
+  const K = buildCluster(g); const s = K.s, F = K.lyF;
+  const cl = Client(g, 150, 480);
+  const b1 = Flow(F, 'M 252 466 L 512 466', {num:1, label:'_bulk: 6 docs', numAt:.5, ny:52});
+  const b3a = Flow(F, 'M 772 226 C 1060 210 1120 770 1262 806', {num:3, numAt:.4});
+  const b3b = Flow(F, 'M 772 300 C 712 360 708 520 742 572', {num:3, numAt:.35, nx:-30});
+  const q31 = Flow(F, 'M 1268 762 C 1060 860 760 760 655 562', {w:4});
+  const q32 = Flow(F, 'M 1320 682 L 1320 362', {w:4});
+  const q12 = Flow(F, 'M 868 490 C 1100 470 1400 450 1500 362', {w:4});
+  const q13 = Flow(F, 'M 868 528 C 1100 560 1450 560 1500 682', {w:4});
+  const reps = [[q31, q32], [q12, q13]];
+  const repDots = reps.map(pr => pr.map(() => Dot(F, C.req))), ackDots = reps.map(pr => pr.map(() => Dot(F, C.ack)));
+  const b5 = Flow(F, 'M 1268 728 C 1120 700 1040 500 905 470', {num:5, color:C.ack, label:'results 1, 3, 4', numAt:.55});
+  const b6 = Flow(F, 'M 512 506 L 252 506', {num:6, color:C.ack, label:'6 results', numAt:.5, ny:42});
+  const sortT = el('g', {}, g);
+  T(sortT, 880, 234, '→ shard 0  (P0 on Node 3)', {fs:23, fw:700, fill:C.muted});
+  T(sortT, 880, 308, '→ shard 1  (P1 on Node 1, local)', {fs:23, fw:700, fill:C.muted});
+  // the 6 doc cards: shard 0 gets 1,3,4 ; shard 1 gets 2,5,6
+  const ids = [1,2,3,4,5,6], sh = {1:0, 2:1, 3:0, 4:0, 5:1, 6:1};
+  const cards = ids.map(id => { const c = el('g', {}, g); const d = Doc(c, 50, 64, String(id), {fs:24, lines:1, ly:2});
+    const ck = Check(c, 18, -26, 13); return {c, id, sh:sh[id], ck, ord:ids.filter(j => sh[j] === sh[id]).indexOf(id)}; });
+  const coord = el('g', {}, K.lyT); Tag(coord, 710, 640, 'coordinating node', {fill:'#422006', color:'#fde68a', stroke:C.req, fs:26});
+  const coll = el('g', {}, K.lyT); Tag(coll, 710, 640, '6 / 6 results collected', {fill:'#14532d', color:'#bbf7d0', stroke:C.green, fs:26});
+  const serial = el('g', {}, K.lyT); Tag(serial, 1430, 470, 'one action at a time', {fill:C.panel2, color:C.text, stroke:C.line, fs:24});
+  const got = el('g', {}, g); Tag(got, 150, 632, '✓ 1 response', {fill:'#14532d', color:'#bbf7d0', fs:28});
+  const pan = Panel(g, 30, 662, 450, 222, '');
+  T(pan, 54, 704, 'Without bulk: 6 round trips', {fs:25, fw:800, fill:C.muted});
+  for (let i = 0; i < 6; i++) Arrow(pan, 60, 722 + i*11, 440, 722 + i*11, '#94a3b8', 3);
+  T(pan, 54, 822, 'With _bulk: 1 round trip', {fs:25, fw:800, fill:C.req});
+  Arrow(pan, 60, 852, 440, 852, C.req, 11);
+  const R0 = 16.8, RD = 4.3; // serial rounds
+  return t => {
+    op(K.frame, P(t, 0, .6)); K.n.forEach(n => n.set(P(t, 0, .6)));
+    run(b1, t, 4, 6.6, 8.4); op(coord, P(t, 6.6, 7.2)*(1 - P(t, 32.4, 32.8)));
+    op(sortT, P(t, 9.4, 10)*(1 - P(t, 16, 16.6)));
+    run(b3a, t, 13, 15.8, 17.4); run(b3b, t, 13, 15.8, 17.4);
+    const p1 = slot(N1, 1), p0 = slot(N3, 0);
+    cards.forEach(cd => {
+      const k = cd.ord; let x, y, sc = 1, o = P(t, .4 + cd.id*.12, .8 + cd.id*.12);
+      const home = {x:120 + (cd.id - 1)*12, y:360 - (cd.id - 1)*7};
+      const sortP = {x:610 + k*64, y:cd.sh ? 304 : 230};
+      const q = cd.sh ? p1 : p0, qp = {x:q.x - 34 + k*34, y:q.y + 74};
+      if (t < 4){ x = home.x; y = home.y; }
+      else if (t < 8){ const pt = b1.pt(P(t, 4, 6.6)); x = pt.x - 20 + (cd.id - 1)*7; y = pt.y - 110 - (cd.id - 1)*5; sc = .8; }
+      else if (t < 13){ const m = P(t, 8, 10.4); const st = {x:492 + (cd.id - 1)*7, y:356 - (cd.id - 1)*5}; x = lerp(st.x, sortP.x, m); y = lerp(st.y, sortP.y, m); sc = lerp(.8, 1, m); }
+      else { const f = cd.sh ? b3b : b3a, m = P(t, 13 + k*.15, 15.8 + k*.15); const pt = f.pt(m), a0 = f.pt(0), a1 = f.pt(1);
+        x = lerp(sortP.x, qp.x, m) + (pt.x - lerp(a0.x, a1.x, m)); y = lerp(sortP.y, qp.y, m) + (pt.y - lerp(a0.y, a1.y, m)); sc = lerp(1, .55, m); }
+      tr(cd.c, x, y, sc); op(cd.c, o);
+      op(cd.ck, P(t, R0 + k*RD + .9, R0 + k*RD + 1.2));
+    });
+    // serial execution + parallel replication, both primaries working at the same time
+    let busy = 0;
+    for (let k = 0; k < 3; k++){ const st = R0 + k*RD; busy = Math.max(busy, pulse(t, st, st + .9));
+      reps.forEach((pr, si) => pr.forEach((f, j) => {
+        dotOn(repDots[si][j], f, P(t, st + .9, st + 2.3), t > st + .9 && t < st + 2.35);
+        dotOn(ackDots[si][j], f, 1 - P(t, st + 2.5, st + 3.7), t > st + 2.5 && t < st + 3.75); })); }
+    [q31, q32, q12, q13].forEach(f => f.set(P(t, R0 + .9, R0 + 2.3), .35*(1 - P(t, 29.6, 30.2)), 0));
+    s.P0c.set(undefined, undefined, 1, 1, 1, busy); s.P1a.set(undefined, undefined, 1, 1, 1, busy);
+    const rr = Math.max(...[0,1,2].map(k => pulse(t, R0 + k*RD + 2.2, R0 + k*RD + 3.1)));
+    [s.R0a, s.R0b, s.R1b, s.R1c].forEach(S => S.set(undefined, undefined, 1, 1, 0, rr));
+    op(serial, win(t, 17, 29.6));
+    run(b5, t, 30, 32.4, 34); op(coll, P(t, 32.6, 33.1));
+    run(b6, t, 33.4, 35.8);
+    op(got, P(t, 35.8, 36.2)); op(pan, P(t, 37.2, 37.8));
+  };
+}});
+
+/* ---------- 9. Recap ---------- */
+SC.push({title:'Recap: the whole picture', dur:30,
+cap:[[0,'The whole picture: an index is split into shards, each shard has a primary and replicas, they live on nodes, and the nodes form a cluster.'],
+     [9.4,'Writes always go through the primary first, and are acknowledged only after the replicas were updated.'],
+     [13.8,'Reads can be served by any copy of the shard.'],
+     [18.2,'More replicas help reads and availability, but every write must still reach every copy.'],
+     [24,'That is the Elasticsearch distributed model in one picture.']],
+build(g){
+  const titles = ['Index', 'Shards', 'Primaries + Replicas', 'Nodes', 'Cluster'];
+  const boxes = titles.map((ti, k) => { const x = 60 + k*370; const bg = el('g', {}, g);
+    el('rect', {x, y:150, width:320, height:250, rx:26, fill:C.panel, stroke:C.line, 'stroke-width':3}, bg);
+    T(bg, x + 160, 372, ti, {fs:k === 2 ? 27 : 32, fw:800, anchor:'middle'});
+    if (k < 4) el('path', {d:`M${x+337} 258 l18 17 l-18 17`, fill:'none', stroke:C.req, 'stroke-width':6, 'stroke-linecap':'round', 'stroke-linejoin':'round'}, bg);
+    const ic = el('g', {transform:`translate(${x + 160} 255)`}, bg);
+    if (k === 0) [2,1,0].forEach(i => { const d = Doc(ic, 70, 90, '', {lines:3}); tr(d, -20 + i*20, -i*10 + 10); });
+    if (k === 1) [0,1,2,3].forEach(i => { el('rect', {x:-118 + i*60, y:-28, width:52, height:56, rx:10, fill:C.green}, ic); T(ic, -92 + i*60, 10, 'ABCD'[i], {fs:28, fw:800, anchor:'middle', fill:C.greenDark}); });
+    if (k === 2){ Shard(ic, {x:-60, y:0, kind:'P', p:'P0', w:96, h:72, fs:32}); Shard(ic, {x:60, y:0, kind:'R', r:'R0', w:96, h:72, fs:32}); }
+    if (k === 3){ el('rect', {x:-120, y:-62, width:240, height:124, rx:20, fill:C.node, stroke:C.nodeStroke, 'stroke-width':4}, ic);
+      Shard(ic, {x:-50, y:8, kind:'P', p:'P1', w:80, h:60, fs:28}); Shard(ic, {x:50, y:8, kind:'R', r:'R0', w:80, h:60, fs:28}); }
+    if (k === 4){ el('rect', {x:-140, y:-75, width:280, height:150, rx:22, fill:'none', stroke:C.muted, 'stroke-width':3, 'stroke-dasharray':'10 7'}, ic);
+      [-82, 0, 82].forEach((nx, i) => el('rect', {x:nx - 34, y:-28, width:68, height:76, rx:14, fill:C.node, stroke:C.nodeStroke, 'stroke-width':3}, ic));
+      const cr = Crown(ic, .55); tr(cr, -82, -46); }
+    return bg; });
+  const tk = [
+    ['W', C.req, 'Writes: ', 'coordinating node → primary → replicas → ack'],
+    ['R', C.ack, 'Reads: ', 'any copy (primary or replica) can answer'],
+    ['+', C.blue, 'More replicas = ', 'faster reads + better availability, NOT faster writes']
+  ].map(([ic, col, a, b], i) => { const y = 520 + i*120; const r = el('g', {}, g);
+    el('rect', {x:110, y:y - 50, width:1700, height:100, rx:24, fill:C.panel, stroke:col, 'stroke-width':3}, r);
+    el('circle', {cx:180, cy:y, r:32, fill:col}, r); T(r, 180, y + 13, ic, {fs:38, fw:900, anchor:'middle', fill:C.ink});
+    const tx = T(r, 240, y + 15, '', {fs:42, fw:700}); const s1 = el('tspan', {fill:col, 'font-weight':900}, tx); s1.textContent = a;
+    const s2 = el('tspan', {}, tx); s2.textContent = b; return r; });
+  return t => {
+    boxes.forEach((b, k) => { op(b, P(t, .4 + k*1.5, 1.1 + k*1.5)); });
+    tk.forEach((r, i) => { op(r, P(t, 9.4 + i*4.4, 10.1 + i*4.4)); tr(r, lerp(-40, 0, P(t, 9.4 + i*4.4, 10.3 + i*4.4)), 0); });
+  };
+}});
+
+/* ================= engine ================= */
+const starts = []; let TOTAL = 0; SC.forEach(s => { starts.push(TOTAL); TOTAL += s.dur; });
+const bg = el('rect', {x:0, y:0, width:1920, height:1080, fill:C.bg}, svg);
+const sceneLayer = el('g', {}, svg);
+const hdr = el('g', {}, svg);
+el('rect', {x:0, y:0, width:1920, height:110, fill:'#0b1224'}, hdr);
+el('line', {x1:0, y1:110, x2:1920, y2:110, stroke:C.line, 'stroke-width':2}, hdr);
+el('circle', {cx:70, cy:56, r:32, fill:C.req}, hdr);
+const hNum = T(hdr, 70, 68, '1', {fs:34, fw:900, anchor:'middle', fill:C.ink});
+const hTitle = T(hdr, 122, 72, '', {fs:44, fw:800});
+const hLegend = el('g', {transform:'translate(1120 32)'}, hdr); buildLegend(hLegend);
+const capG = el('g', {}, svg);
+el('rect', {x:0, y:900, width:1920, height:180, fill:'#0b1224'}, capG);
+el('line', {x1:0, y1:900, x2:1920, y2:900, stroke:C.line, 'stroke-width':2}, capG);
+const capInner = el('g', {}, capG);
+let cur = -1, upd = null, capKey = '', gNow = 0;
+
+function buildScene(i){
+  while (sceneLayer.firstChild) sceneLayer.removeChild(sceneLayer.firstChild);
+  op(sceneLayer, 1);
+  const g = el('g', {}, sceneLayer);
+  upd = SC[i].build(g); cur = i; capKey = '';
+  hNum.textContent = String(i + 1); hTitle.textContent = SC[i].title;
+  // shrink long titles so they never collide with the legend
+  hTitle.setAttribute('font-size', 44); const w = textW(hTitle, SC[i].title, 44);
+  if (w > 960) hTitle.setAttribute('font-size', Math.floor(44*960/w));
+}
+function capIndex(i, lt){ const cs = SC[i].cap; let ci = 0; for (let k = 0; k < cs.length; k++) if (cs[k][0] <= lt + 1e-6) ci = k; return ci; }
+function drawCaption(s){
+  while (capInner.firstChild) capInner.removeChild(capInner.firstChild);
+  let step = null; const m = s.match(/^\((\d+)\)\s*/); if (m){ step = m[1]; s = s.slice(m[0].length); }
+  let fs = 40; let maxW = step ? 1640 : 1760;
+  const meas = T(capInner, 0, -999, '', {fs, fw:600});
+  const wrap = f => { meas.setAttribute('font-size', f); const words = s.split(' '); const lines = []; let line = '';
+    for (const w of words){ const tryL = line ? line + ' ' + w : w; meas.textContent = tryL;
+      if (textW(meas, tryL, f) > maxW && line){ lines.push(line); line = w; } else line = tryL; }
+    if (line) lines.push(line); return lines; };
+  let lines = wrap(fs); if (lines.length > 2){ fs = 35; lines = wrap(fs); }
+  if (lines.length === 2){ // balance the two lines so a single word never dangles
+    meas.setAttribute('font-size', fs); meas.textContent = s; const full = textW(meas, s, fs); const keep = maxW;
+    for (let w = Math.ceil(full/2); w < keep; w += 16){ maxW = w; const l2 = wrap(fs); if (l2.length <= 2){ lines = l2; break; } }
+    maxW = keep; }
+  let mw = 0; lines.forEach(l => { meas.textContent = l; mw = Math.max(mw, textW(meas, l, fs)); });
+  capInner.removeChild(meas);
+  const lh = fs*1.3, cx = 960 + (step ? 44 : 0), y0 = 990 - (lines.length - 1)*lh/2 + fs*.35;
+  lines.forEach((l, k) => T(capInner, cx, y0 + k*lh, l, {fs, fw:600, anchor:'middle'}));
+  if (step){ const sx = cx - mw/2 - 58; el('circle', {cx:sx, cy:990, r:32, fill:C.req}, capInner); T(capInner, sx, 1002, step, {fs:34, fw:900, anchor:'middle', fill:C.ink}); }
+}
+function render(gt){
+  gt = clamp(gt, 0, TOTAL - 1e-4); gNow = gt;
+  let i = 0; while (i < SC.length - 1 && gt >= starts[i + 1]) i++;
+  if (i !== cur) buildScene(i);
+  const lt = gt - starts[i];
+  upd(lt);
+  op(sceneLayer, P(lt, 0, .5));
+  op(hLegend, SC[i].legendFrom != null ? (lt >= SC[i].legendFrom ? 1 : 0) : 1);
+  const ci = capIndex(i, lt), key = i + ':' + ci;
+  if (key !== capKey){ capKey = key; drawCaption(SC[i].cap[ci][1]); }
+  op(capInner, P(lt, SC[i].cap[ci][0], SC[i].cap[ci][0] + .35));
+  updateUI(i, lt);
+}
+
+/* ================= player UI ================= */
+const $ = id => document.getElementById(id);
+const fmt = s => Math.floor(s/60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
+let playing = false, last = 0, uiScene = -1;
+SC.forEach((s, i) => { const b = document.createElement('button'); b.textContent = i + 1; b.title = (i + 1) + '. ' + s.title; b.onclick = () => { render(starts[i]); }; $('chips').appendChild(b); });
+function updateUI(i, lt){
+  if (document.body.classList.contains('render')) return;
+  $('fill').style.width = (100*lt/SC[i].dur) + '%';
+  $('label').textContent = `Scene ${i + 1}/${SC.length} · ${SC[i].title}`;
+  $('time').textContent = `${fmt(lt)} / ${fmt(SC[i].dur)}   ·   total ${fmt(gNow)} / ${fmt(TOTAL)}`;
+  if (uiScene !== i){ uiScene = i; const tk = $('ticks'); tk.innerHTML = '';
+    SC[i].cap.forEach(c => { if (c[0] <= 0) return; const d = document.createElement('div'); d.className = 'tick'; d.style.left = (100*c[0]/SC[i].dur) + '%'; tk.appendChild(d); });
+    [...$('chips').children].forEach((b, k) => { b.className = k === i ? 'on' : k < i ? 'done' : ''; }); }
+}
+function setPlaying(p){ playing = p; $('play').innerHTML = p ? '&#10074;&#10074; Pause' : '&#9654; Play'; last = performance.now(); if (p) requestAnimationFrame(loop); }
+function loop(now){
+  if (!playing) return;
+  const dt = Math.min(.1, (now - last)/1000)*parseFloat($('speed').value); last = now;
+  let nt = gNow + dt;
+  if ($('autopause').checked){ // stop exactly at the next step boundary
+    const i = cur, lt = gNow - starts[i];
+    const nextCap = SC[i].cap.map(c => c[0]).find(c => c > lt + 1e-6);
+    const bound = nextCap != null ? starts[i] + nextCap : starts[i] + SC[i].dur;
+    if (nt >= bound){ render(bound + 1e-3); setPlaying(false); return; }
+  }
+  if (nt >= TOTAL){ render(TOTAL); setPlaying(false); return; }
+  render(nt); requestAnimationFrame(loop);
+}
+$('play').onclick = () => { if (!playing && gNow >= TOTAL - .01) render(0); setPlaying(!playing); };
+$('next').onclick = () => { if (cur < SC.length - 1) render(starts[cur + 1]); };
+$('prev').onclick = () => { const lt = gNow - starts[cur]; render(lt > 1.5 || cur === 0 ? starts[cur] : starts[cur - 1]); };
+$('bar').onclick = e => { const r = $('bar').getBoundingClientRect(); render(starts[cur] + SC[cur].dur*clamp((e.clientX - r.left)/r.width)); };
+svg.onclick = () => $('play').click();
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'SELECT') return;
+  if (e.code === 'Space'){ e.preventDefault(); $('play').click(); }
+  else if (e.key === 'ArrowRight') $('next').click();
+  else if (e.key === 'ArrowLeft') $('prev').click();
+  else if (e.key === 'Home') render(0);
+});
+
+const RENDER = /[?&]render\b/.test(location.search);
+if (RENDER) document.body.classList.add('render');
+window.__total = TOTAL; window.__seek = t => { render(t); return true; };
+window.__scenes = SC.map((s, i) => ({title:s.title, start:starts[i], dur:s.dur}));
+const boot = () => render(0);
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(boot); else boot();
+</script>
+</body>
+</html>

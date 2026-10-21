@@ -1,14 +1,61 @@
-# Docker Compose file that starts a local Elasticsearch + Kibana stack for the lesson.
+# Docker Compose file that starts the full lesson environment:
+# Kafka (+ Zookeeper + Kafdrop UI), Elasticsearch + Kibana, and the developer container (Spark + Python).
 # Run from this folder with:  docker compose up -d
-# NOTE: Kafka, Spark, Airflow and PostgreSQL ("course-kafka", "postgres") come from the
-# course environment. All containers must share the same Docker network so that the
-# hostnames "elasticsearch" and "course-kafka" resolve from the Python scripts.
+# All services share the same default Docker network, so containers reach each other by
+# service name: "course-kafka:9092", "elasticsearch:9200", "zookeeper:2181".
+# Run the Python scripts from inside "dev_env" so these hostnames resolve.
 
 # Compose file format version
 version: "3"
 
 # List of containers (services) to run
 services:
+
+    # ---------------- Zookeeper: coordination service that Kafka 2.x needs ----------------
+    zookeeper:
+        # Fixed container name, so Kafka can reach it as "zookeeper"
+        container_name: zookeeper
+        # Zookeeper image
+        image: wurstmeister/zookeeper:latest
+        # Expose the Zookeeper client port
+        ports:
+            - "2181:2181"
+
+    # ---------------- Kafka: the message broker ----------------
+    course-kafka:
+        # Fixed container name - this is the "course-kafka" hostname used in all scripts
+        container_name: course-kafka
+        # Kafka 2.8.1 built for Scala 2.13
+        image: wurstmeister/kafka:2.13-2.8.1
+        # Environment variables passed to Kafka
+        environment:
+            # Hostname that Kafka advertises to clients (must be resolvable by the clients)
+            KAFKA_ADVERTISED_HOST_NAME: course-kafka
+            # Where Kafka finds Zookeeper
+            KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+        # Expose the Kafka broker port
+        ports:
+            - "9092:9092"
+        # Start Kafka only after Zookeeper was started
+        depends_on:
+            - zookeeper
+
+    # ---------------- Kafdrop: web UI for browsing Kafka topics and messages ----------------
+    kafdrop:
+        # Fixed container name
+        container_name: kafdrop
+        # Kafdrop image
+        image: obsidiandynamics/kafdrop:3.30.0
+        # Expose the Kafdrop UI on the host: http://localhost:9003
+        ports:
+            - "9003:9000"
+        # Environment variables passed to Kafdrop
+        environment:
+            # The Kafka broker Kafdrop connects to
+            - KAFKA_BROKERCONNECT=course-kafka:9092
+        # Start Kafdrop only after Kafka was started
+        depends_on:
+            - course-kafka
 
     # ---------------- Elasticsearch: the search & analytics engine ----------------
     elasticsearch:
@@ -36,3 +83,22 @@ services:
         # Start Kibana only after the Elasticsearch container was started
         depends_on:
             - elasticsearch
+
+    # ---------------- Developer environment: Python + Spark 3.4.0 + SSH + Jupyter ----------------
+    dev_env:
+        # Fixed container name
+        container_name: dev_env
+        # Course developer image with Spark 3.4.0 and an SSH server
+        image: ofrir119/developer_env:spark340_ssh
+        # Exposed ports
+        ports:
+            # SSH (host port 22022 -> container port 22) - connect with VS Code Remote-SSH / Airflow SSHOperator
+            - "22022:22"
+            # Jupyter Notebook: http://localhost:8888
+            - "8888:8888"
+            # Spark UI for the first running Spark application: http://localhost:4040
+            - "4040:4040"
+            # Spark UI for a second application running at the same time
+            - "4041:4041"
+            # Spark UI for a third application running at the same time
+            - "4042:4042"

@@ -8,7 +8,7 @@ The folders are numbered. Work through them in order.
 
 | Folder | Where | What |
 |--------|-------|------|
-| `00_setup` | In class | Start Elasticsearch + Kibana |
+| `00_setup` | In class | Start the environment: Kafka, Kafdrop, Elasticsearch, Kibana, dev_env |
 | `01_nyc_taxi_to_elasticsearch` | In class | Kafka → Elasticsearch, first queries and aggregations |
 | `02_crypto_pipeline` | In class (demo) | End-to-end pipeline: Airflow + Kafka + Spark → PostgreSQL / Elasticsearch |
 | `03_kibana_guided` | In class | Guided Kibana exercise on the `nyctaxi` data: Dev Tools, Discover, dashboard |
@@ -17,7 +17,7 @@ The folders are numbered. Work through them in order.
 ```
 naya_elk_exercises/
 ├── 00_setup/
-│   └── docker-compose.yml                         # Elasticsearch + Kibana
+│   └── docker-compose.yml                         # Kafka + Kafdrop + Elasticsearch + Kibana + dev_env
 ├── 01_nyc_taxi_to_elasticsearch/                  # Part 1 - core Elasticsearch exercises
 │   ├── 01_producer/taxi_producer.py               # NYC API  -> Kafka
 │   ├── 02_consumer/taxi_consumer.py               # Kafka    -> Elasticsearch
@@ -49,9 +49,9 @@ terminal, and keep it open while you continue to the next step.
 
 | Step | Terminal | Run | Wait until / Check |
 |------|----------|-----|--------------------|
-| 1 | T1 | `cd 00_setup && docker compose up -d` | http://localhost:9200 returns JSON and http://localhost:5601 opens Kibana |
+| 1 | T1 | `cd 00_setup && docker compose up -d` | `docker ps` shows 6 containers. http://localhost:9200, http://localhost:5601 (Kibana) and http://localhost:9003 (Kafdrop) open. From here on, run every command inside `dev_env`. |
 | 2 | T1 | `pip install -r requirements.txt` | Install finishes without errors |
-| 3 | T2 | `python 01_nyc_taxi_to_elasticsearch/01_producer/taxi_producer.py` | Trip records are printed, one per second. **Keep it running.** |
+| 3 | T2 | `python 01_nyc_taxi_to_elasticsearch/01_producer/taxi_producer.py` | Trip records are printed, one per second, and the topic `my_trip` appears in Kafdrop. **Keep it running.** |
 | 4 | T3 | `python 01_nyc_taxi_to_elasticsearch/02_consumer/taxi_consumer.py` | No output, which is expected. **Keep it running.** |
 | 5 | Kibana Dev Tools | `GET /nyctaxi/_count` | `count` is greater than 0 and grows each time you run it |
 | 6 | Kibana Dev Tools | `GET /nyctaxi/_mapping` | Every field is `text` + `keyword`. This is the reason for `.keyword` in the queries. |
@@ -86,8 +86,8 @@ Elasticsearch and Kibana from Part 1 must still be running.
 
 ## Prerequisites
 
-- Docker and Docker Compose
-- The course environment: Kafka (`course-kafka:9092`), Spark, Airflow, PostgreSQL
+- Docker and Docker Compose. `00_setup/docker-compose.yml` starts Kafka, Elasticsearch, Kibana and the dev container.
+- For Part 2 only: Airflow and PostgreSQL from the course environment. They are not part of this compose file.
 - Python 3.7+
 
 ```bash
@@ -97,23 +97,29 @@ pip install -r requirements.txt
 > The Elasticsearch Python client must match the server's major version. The server here
 > is 7.13.2, so the client is pinned to `elasticsearch==7.13.2`.
 
-> The scripts connect to the hostnames `elasticsearch` and `course-kafka`. Run them from a
-> container that is on the same Docker network as Elasticsearch and Kafka, or change the
-> hosts to `localhost`.
+> The scripts connect to the hostnames `elasticsearch` and `course-kafka`. Run them from
+> **inside the `dev_env` container**, which is on the same Docker network, so these names resolve.
+> Connect over SSH (`ssh -p 22022 <user>@localhost`), use VS Code Remote-SSH, or use Jupyter at
+> http://localhost:8888.
 
 ---
 
-## 00 - Setup: start Elasticsearch and Kibana
+## 00 - Setup: start the environment
 
 ```bash
 cd 00_setup
 docker compose up -d
+docker ps          # all 6 containers should be "Up"
 ```
 
-| Service       | URL                     | Check                                     |
-|---------------|-------------------------|-------------------------------------------|
-| Elasticsearch | http://localhost:9200   | Returns JSON with `"number" : "7.13.2"`   |
-| Kibana        | http://localhost:5601   | Opens the Kibana UI (allow about a minute) |
+| Service | Container | URL / Port | What it is for |
+|---------|-----------|------------|----------------|
+| Zookeeper | `zookeeper` | `2181` | Coordination service required by Kafka |
+| Kafka | `course-kafka` | `9092` | Message broker. Topics: `my_trip`, `crypto_*` |
+| Kafdrop | `kafdrop` | http://localhost:9003 | Web UI to browse Kafka topics and messages |
+| Elasticsearch | `elasticsearch` | http://localhost:9200 | Returns JSON with `"number" : "7.13.2"` |
+| Kibana | `kibana` | http://localhost:5601 | UI for Elasticsearch (allow about a minute to start) |
+| Dev environment | `dev_env` | SSH `22022`, Jupyter http://localhost:8888, Spark UI http://localhost:4040-4042 | Run the Python and Spark scripts from here |
 
 Useful Kibana pages:
 - **Dev Tools** (Menu → Management → Dev Tools): run raw Elasticsearch queries.

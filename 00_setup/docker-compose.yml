@@ -1,0 +1,38 @@
+# Docker Compose file that starts a local Elasticsearch + Kibana stack for the lesson.
+# Run from this folder with:  docker compose up -d
+# NOTE: Kafka, Spark, Airflow and PostgreSQL ("course-kafka", "postgres") come from the
+# course environment. All containers must share the same Docker network so that the
+# hostnames "elasticsearch" and "course-kafka" resolve from the Python scripts.
+
+# Compose file format version
+version: "3"
+
+# List of containers (services) to run
+services:
+
+    # ---------------- Elasticsearch: the search & analytics engine ----------------
+    elasticsearch:
+        # Fixed container name, so other containers can reach it as "elasticsearch"
+        container_name: elasticsearch
+        # Official Elasticsearch image, version 7.13.2
+        image: docker.elastic.co/elasticsearch/elasticsearch:7.13.2
+        # Expose the REST API on the host: http://localhost:9200
+        ports:
+            - "9200:9200"
+        # Environment variables passed to Elasticsearch
+        environment:
+            # Run as a single-node cluster (no need to discover other nodes)
+            discovery.type: single-node
+
+    # ---------------- Kibana: the UI for Elasticsearch ----------------
+    kibana:
+        # Fixed container name
+        container_name: kibana
+        # Kibana version must match the Elasticsearch version
+        image: docker.elastic.co/kibana/kibana:7.13.2
+        # Expose the Kibana UI on the host: http://localhost:5601
+        ports:
+            - "5601:5601"
+        # Start Kibana only after the Elasticsearch container was started
+        depends_on:
+            - elasticsearch

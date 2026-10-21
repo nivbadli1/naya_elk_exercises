@@ -32,7 +32,8 @@ naya_elk_exercises/
 │   └── kibana_exercise.md                         # Part 3 - guided Kibana exercise (answers included)
 └── 04_homework/                                   # Homework - done independently
     ├── README.md                                  # The assignment
-    └── kibana_dashboard_guide.md                  # Step-by-step dashboard guide
+    ├── kibana_dashboard_guide.md                  # Step-by-step dashboard guide
+    └── solution/                                  # Reference solution + run order
 ```
 
 ---
@@ -249,7 +250,8 @@ from CoinGecko:
 3. **3 analysis queries**: average prices, top gainers and losers, market trends.
 4. **Kibana dashboard**: line chart, bar chart, heat map and data table. See `kibana_dashboard_guide.md`.
 
-The full assignment is in [`04_homework/README.md`](04_homework/README.md).
+The full assignment is in [`04_homework/README.md`](04_homework/README.md). The reference
+solution and its run order are in [`04_homework/solution/`](04_homework/solution/README.md).
 
 How it differs from `02_crypto_pipeline` in class: the students write all the code
 themselves, define an **explicit mapping** before indexing, fetch 15 coins instead of 4, and

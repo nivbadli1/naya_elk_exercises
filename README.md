@@ -27,6 +27,50 @@ elasticsearch-course/
 
 ---
 
+## Run Order - Step by Step
+
+Producers and consumers run forever, until you stop them with `Ctrl+C`. Give each one its own
+terminal, and keep it open while you continue to the next step.
+
+### Part 1 - NYC Taxi
+
+| Step | Terminal | Run | Wait until / Check |
+|------|----------|-----|--------------------|
+| 1 | T1 | `cd 00_setup && docker compose up -d` | http://localhost:9200 returns JSON and http://localhost:5601 opens Kibana |
+| 2 | T1 | `pip install -r requirements.txt` | Install finishes without errors |
+| 3 | T2 | `python 01_nyc_taxi_to_elasticsearch/01_producer/taxi_producer.py` | Trip records are printed, one per second. **Keep it running.** |
+| 4 | T3 | `python 01_nyc_taxi_to_elasticsearch/02_consumer/taxi_consumer.py` | No output, which is expected. **Keep it running.** |
+| 5 | Kibana Dev Tools | `GET /nyctaxi/_count` | `count` is greater than 0 and grows each time you run it |
+| 6 | Kibana Dev Tools | `GET /nyctaxi/_mapping` | Every field is `text` + `keyword`. This is the reason for `.keyword` in the queries. |
+| 7 | T1 | `python 01_nyc_taxi_to_elasticsearch/03_queries/01_query_filtering.py` | A list of filtered trips |
+| 8 | T1 | `python 01_nyc_taxi_to_elasticsearch/03_queries/02_aggregation_trips_by_vendor.py` | Trip count per vendor |
+| 9 | T1 | `python 01_nyc_taxi_to_elasticsearch/03_queries/03_aggregation_avg_fare_by_payment.py` | Average fare per payment type |
+| 10 | T2, T3 | `Ctrl+C` | Stop the producer and the consumer |
+
+> In Part 1 you may start the consumer before or after the producer. The consumer uses
+> `auto_offset_reset='earliest'`, so it also reads the messages that were sent before it started.
+
+### Part 2 - Crypto Pipeline
+
+Elasticsearch and Kibana from Part 1 must still be running.
+
+| Step | Terminal | Run | Wait until / Check |
+|------|----------|-----|--------------------|
+| 1 | T2 | `spark-submit 02_crypto_pipeline/03_consumers/02_consumer_elasticsearch.py` | Spark starts and waits for data. **Keep it running.** |
+| 2 | T3 *(optional)* | `spark-submit 02_crypto_pipeline/03_consumers/01_consumer_postgres.py` | Prints `Batch N ...` lines. **Keep it running.** |
+| 3 | T1 | `export COINGECKO_API_KEY="<your key>"` then `python 02_crypto_pipeline/01_producer/coins_producer.py` | `Producing message to crypto_...` lines, then `Published data successfully` |
+| 4 | T2 | - | Log line `Batch N written to Elasticsearch successfully.` |
+| 5 | Kibana Dev Tools | `GET /crypto_data/_search` | Documents for 4 currencies |
+| 6 | Airflow UI | Copy `dag_ssh.py` to the `dags/` folder, set up `ssh_default`, then trigger `produce_coins_to_kafka` | The task finishes green. This replaces running step 3 by hand. |
+| 7 | Kibana | Create the `crypto_data` index pattern with the `timestamp` time field, then build the dashboard (Exercise 2.4) | The charts show the prices |
+| 8 | Airflow UI | Trigger the DAG a few more times | New points appear on the dashboard |
+| 9 | T2, T3 | `Ctrl+C` | Stop the Spark consumers |
+
+> In Part 2, **start the Spark consumers before the producer.** Spark Structured Streaming reads
+> Kafka from the `latest` offset by default, so it skips messages that were sent before it started.
+
+---
+
 ## Prerequisites
 
 - Docker and Docker Compose

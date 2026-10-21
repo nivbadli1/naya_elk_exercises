@@ -10,7 +10,7 @@ The folders are numbered. Work through them in order.
 |--------|-------|------|
 | `00_setup` | In class | Start the environment: Kafka, Kafdrop, Elasticsearch, Kibana, dev_env |
 | `01_nyc_taxi_to_elasticsearch` | In class | Kafka → Elasticsearch, first queries and aggregations |
-| `02_crypto_pipeline` | In class (demo) | End-to-end pipeline: Kafka + Spark → PostgreSQL / Elasticsearch |
+| `02_crypto_pipeline` | In class | Same pattern with live data: CoinGecko → Kafka → Elasticsearch → Kibana dashboard |
 | `03_kibana_guided` | In class | Guided Kibana exercise on the `nyctaxi` data: Dev Tools, Discover, dashboard |
 | `04_homework` | **At home** | Build a crypto pipeline on your own: Kafka → Elasticsearch with a mapping → queries → Kibana dashboard |
 
@@ -27,9 +27,7 @@ naya_elk_exercises/
 │       └── 03_aggregation_avg_fare_by_payment.py  # nested aggregation + script
 ├── 02_crypto_pipeline/                            # Part 2 - end-to-end pipeline
 │   ├── 01_producer/coins_producer.py              # CoinGecko API -> Kafka (every 60 seconds)
-│   └── 02_consumers/
-│       ├── 01_consumer_postgres.py                # Spark: Kafka -> PostgreSQL
-│       └── 02_consumer_elasticsearch.py           # Spark: Kafka -> Elasticsearch -> Kibana
+│   └── 02_consumer/coins_consumer.py              # Kafka -> Elasticsearch (crypto_data)
 ├── 03_kibana_guided/
 │   └── kibana_exercise.md                         # Part 3 - guided Kibana exercise (answers included)
 └── 04_homework/                                   # Homework - done independently
@@ -68,24 +66,22 @@ Elasticsearch and Kibana from Part 1 must still be running.
 
 | Step | Terminal | Run | Wait until / Check |
 |------|----------|-----|--------------------|
-| 1 | T2 | `spark-submit 02_crypto_pipeline/02_consumers/02_consumer_elasticsearch.py` | Spark starts and waits for data. **Keep it running.** |
-| 2 | T3 *(optional)* | `spark-submit 02_crypto_pipeline/02_consumers/01_consumer_postgres.py` | Prints `Batch N ...` lines. **Keep it running.** |
-| 3 | T1 | `python 02_crypto_pipeline/01_producer/coins_producer.py` | `Producing message to crypto_...` lines, then `Published data successfully`, repeated every 60 seconds. **Keep it running.** |
-| 4 | T2 | - | Log line `Batch N written to Elasticsearch successfully.` |
-| 5 | Kibana Dev Tools | `GET /crypto_data/_search` | Documents for 4 currencies |
+| 1 | T2 | `python 02_crypto_pipeline/01_producer/coins_producer.py` | `Producing message to crypto_...` lines, then `Published data successfully`, repeated every 60 seconds. **Keep it running.** |
+| 2 | Kafdrop | http://localhost:9003 | 4 new topics: `crypto_bitcoin`, `crypto_ethereum`, `crypto_solana`, `crypto_tether` |
+| 3 | T3 | `python 02_crypto_pipeline/02_consumer/coins_consumer.py` | `Indexed bitcoin: price=...` lines. **Keep it running.** |
+| 4 | Kibana Dev Tools | `GET /crypto_data/_count` | `count` grows by 4 every minute |
+| 5 | Kibana Dev Tools | `GET /crypto_data/_mapping` | `price` is `float` and `timestamp` is `date`. Compare with `nyctaxi`. |
 | 6 | Kibana | Create the `crypto_data` index pattern with the `timestamp` time field, then build the dashboard (Exercise 2.3) | The charts show the prices, with a new point every minute |
-| 7 | T1, T2, T3 | `Ctrl+C` | Stop the producer |
-| 8 | T2, T3 | `Ctrl+C` | Stop the Spark consumers |
+| 7 | T2, T3 | `Ctrl+C` | Stop the producer and the consumer |
 
-> In Part 2, **start the Spark consumers before the producer.** Spark Structured Streaming reads
-> Kafka from the `latest` offset by default, so it skips messages that were sent before it started.
+> As in Part 1, the order of the producer and the consumer doesn't matter. The consumer uses
+> `auto_offset_reset='earliest'`.
 
 ---
 
 ## Prerequisites
 
 - Docker and Docker Compose. `00_setup/docker-compose.yml` starts Kafka, Elasticsearch, Kibana and the dev container.
-- For the optional PostgreSQL consumer in Part 2 only: PostgreSQL from the course environment. It is not part of this compose file.
 - Python 3.7+
 
 ```bash
@@ -117,7 +113,7 @@ docker ps          # all 6 containers should be "Up"
 | Kafdrop | `kafdrop` | http://localhost:9003 | Web UI to browse Kafka topics and messages |
 | Elasticsearch | `elasticsearch` | http://localhost:9200 | Returns JSON with `"number" : "7.13.2"` |
 | Kibana | `kibana` | http://localhost:5601 | UI for Elasticsearch (allow about a minute to start) |
-| Dev environment | `dev_env` | SSH `22022`, Jupyter http://localhost:8888, Spark UI http://localhost:4040-4042 | Run the Python and Spark scripts from here |
+| Dev environment | `dev_env` | SSH `22022`, Jupyter http://localhost:8888, Spark UI http://localhost:4040-4042 | Run the Python scripts from here |
 
 Useful Kibana pages:
 - **Dev Tools** (Menu → Management → Dev Tools): run raw Elasticsearch queries.
@@ -186,7 +182,7 @@ python 01_nyc_taxi_to_elasticsearch/03_queries/03_aggregation_avg_fare_by_paymen
 
 ---
 
-## Part 2 - Crypto pipeline: API → Kafka → Spark → PostgreSQL / Elasticsearch → Kibana
+## Part 2 - Crypto pipeline: CoinGecko API → Kafka → Elasticsearch → Kibana
 
 ### Exercise 2.1 - Producer (`01_producer/coins_producer.py`)
 Fetches market data for Bitcoin, Ethereum, Solana and Tether from the CoinGecko API, and sends
@@ -201,25 +197,16 @@ export COINGECKO_API_KEY="<your key>"   # optional
 python 02_crypto_pipeline/01_producer/coins_producer.py
 ```
 
-### Exercise 2.2 - Spark consumers (`02_consumers/`)
-Both consumers use Spark Structured Streaming with the same steps:
-read Kafka → cast `value` to string → `from_json` with a schema → select and rename columns → `foreachBatch` write.
-
-| File | Reads | Writes to |
-|------|-------|-----------|
-| `01_consumer_postgres.py` | `crypto_bitcoin` | PostgreSQL table `crypto_data` (JDBC) |
-| `02_consumer_elasticsearch.py` | all 4 crypto topics | Elasticsearch index `crypto_data` |
+### Exercise 2.2 - Consumer (`02_consumer/coins_consumer.py`)
+The same pattern as the taxi consumer, with three differences:
+- It subscribes to **4 topics** at once.
+- It keeps only 5 fields and renames them: `currency`, `timestamp`, `price`, `volume` and `market_cap`.
+- It sets its own document `_id` (`<currency>_<timestamp>`). If the producer fetches the same price
+  twice, the document is overwritten instead of duplicated.
 
 ```bash
-spark-submit 02_crypto_pipeline/02_consumers/02_consumer_elasticsearch.py
+python 02_crypto_pipeline/02_consumer/coins_consumer.py
 ```
-
-> **Version note:** `02_consumer_elasticsearch.py` uses the connector
-> `elasticsearch-spark-30_2.12:8.1.2`, while the server is 7.13.2. If you get version errors,
-> switch to a 7.x connector, for example `org.elasticsearch:elasticsearch-spark-30_2.12:7.13.2`.
->
-> The checkpoint location is `s3a://elastic-checkpoint/`, the MinIO/S3 bucket of the course
-> environment. For a local run, change it to a local folder such as `/tmp/elastic-checkpoint`.
 
 ### Exercise 2.3 - Kibana dashboard
 1. Stack Management → Index Patterns → create `crypto_data`, with **`timestamp`** as the time field.
@@ -229,8 +216,9 @@ spark-submit 02_crypto_pipeline/02_consumers/02_consumer_elasticsearch.py
    - a metric with the latest `market_cap` per currency
 4. Keep the producer running and watch the dashboard update every minute.
 
-**Discussion:** Compare the `crypto_data` mapping with `nyctaxi`. Here Spark sends real
-`double` and `timestamp` types, so aggregations work directly without scripts.
+**Discussion:** Compare the `crypto_data` mapping with `nyctaxi`. CoinGecko sends real numbers
+and ISO dates, so dynamic mapping creates `float` and `date` fields. Aggregations and time
+charts then work directly, without `.keyword` or scripts.
 
 ---
 
@@ -263,6 +251,17 @@ from CoinGecko:
 
 The full assignment is in [`04_homework/README.md`](04_homework/README.md).
 
-How it differs from the class demo in `02_crypto_pipeline`: the consumer is plain Python, not
-Spark, and the students define the mapping themselves. That fixes the `.keyword` and string
-problems they saw with `nyctaxi`, so aggregations work without scripts.
+How it differs from `02_crypto_pipeline` in class: the students write all the code
+themselves, define an **explicit mapping** before indexing, fetch 15 coins instead of 4, and
+add 3 analysis queries.
+
+---
+
+## Troubleshooting
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `SSLError ... CERTIFICATE_VERIFY_FAILED` in a producer | The network inspects HTTPS traffic | Both producers already call the API with `verify=False`. If you write your own code, do the same. |
+| `UnsupportedProductError: The client noticed that the server is not Elasticsearch` | The Python client is 8.x or newer, but the server is 7.13.2 | `pip uninstall -y elasticsearch elastic-transport && pip install "elasticsearch==7.13.2"`, then restart the Jupyter kernel |
+| `course-kafka` container exits right after `docker compose up` | Kafka restarted before Zookeeper cleared the old session | Wait about 10 seconds, then run `docker start course-kafka` |
+| `ElasticsearchWarning: ... security features are not enabled` | Elasticsearch runs without a password (lab setup) | Only a warning. Safe to ignore in class. |

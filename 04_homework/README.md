@@ -21,8 +21,16 @@ Cryptocurrency API → Kafka Producer → Kafka Topic → Kafka Consumer → Ela
 - Kibana
 - Python Libraries:
   - `kafka-python`
-  - `elasticsearch`
+  - `elasticsearch==7.13.2`. The client must match the server version. A newer client fails with `UnsupportedProductError`.
   - `requests`
+
+```bash
+pip install kafka-python "elasticsearch==7.13.2" requests
+```
+
+> **SSL note:** on the class network, calls to the CoinGecko API fail with
+> `SSLError ... CERTIFICATE_VERIFY_FAILED`. Add `verify=False` to `requests.get(...)` and call
+> `urllib3.disable_warnings()` once at the top of the script, as in the examples below.
 
 ## Exercise Components
 
@@ -46,6 +54,10 @@ Parameters:
 Complete API Request Example:
 ```python
 import requests
+import urllib3
+
+# Skip the SSL warning caused by verify=False (class network)
+urllib3.disable_warnings()
 
 api_url = 'https://api.coingecko.com/api/v3/coins/markets'
 params = {
@@ -56,7 +68,7 @@ params = {
     'sparkline': False
 }
 
-response = requests.get(api_url, params=params)
+response = requests.get(api_url, params=params, verify=False)
 if response.status_code == 200:
     crypto_data = response.json()
     # Process data
@@ -121,52 +133,40 @@ Elasticsearch Index Details:
   - timestamp
 
 Detailed Elasticsearch Mapping:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | `keyword` | Unique identifier for the cryptocurrency (e.g. `bitcoin`) |
+| `symbol` | `keyword` | Trading symbol (e.g. `btc`) |
+| `name` | `text` + `keyword` sub-field | Full name of the cryptocurrency (e.g. `Bitcoin`) |
+| `current_price` | `float` | Current price in USD |
+| `market_cap` | `long` | Market capitalization in USD |
+| `market_cap_rank` | `integer` | Rank by market capitalization |
+| `price_change_24h` | `float` | Absolute price change in USD over 24 hours |
+| `price_change_percentage_24h` | `float` | Percentage price change over 24 hours |
+| `timestamp` | `date` | When the data was recorded |
+
+The same mapping as JSON, ready for Kibana Dev Tools (`PUT /cryptoprices`):
 ```json
 {
   "mappings": {
     "properties": {
-      "id": {
-        "type": "keyword",
-        "description": "Unique identifier for the cryptocurrency (e.g., 'bitcoin')"
-      },
-      "symbol": {
-        "type": "keyword",
-        "description": "Trading symbol (e.g., 'btc')"
-      },
+      "id": { "type": "keyword" },
+      "symbol": { "type": "keyword" },
       "name": {
         "type": "text",
         "fields": {
-          "keyword": {
-            "type": "keyword",
-            "ignore_above": 256
-          }
-        },
-        "description": "Full name of the cryptocurrency (e.g., 'Bitcoin')"
+          "keyword": { "type": "keyword", "ignore_above": 256 }
+        }
       },
-      "current_price": {
-        "type": "float",
-        "description": "Current price in USD"
-      },
-      "market_cap": {
-        "type": "long",
-        "description": "Market capitalization in USD"
-      },
-      "market_cap_rank": {
-        "type": "integer",
-        "description": "Rank by market capitalization"
-      },
-      "price_change_24h": {
-        "type": "float",
-        "description": "Absolute price change in USD over 24 hours"
-      },
-      "price_change_percentage_24h": {
-        "type": "float",
-        "description": "Percentage price change over 24 hours"
-      },
+      "current_price": { "type": "float" },
+      "market_cap": { "type": "long" },
+      "market_cap_rank": { "type": "integer" },
+      "price_change_24h": { "type": "float" },
+      "price_change_percentage_24h": { "type": "float" },
       "timestamp": {
         "type": "date",
-        "format": "strict_date_optional_time||epoch_millis",
-        "description": "Timestamp when the data was recorded"
+        "format": "strict_date_optional_time||epoch_millis"
       }
     }
   }
@@ -277,8 +277,12 @@ After completing the exercise, think about these questions:
 ```python
 from kafka import KafkaProducer
 import requests
+import urllib3
 import json
 import time
+
+# Skip the SSL warning caused by verify=False (class network)
+urllib3.disable_warnings()
 
 # Kafka configuration
 producer = KafkaProducer(
@@ -297,7 +301,7 @@ params = {
 }
 
 # Fetch and send data
-response = requests.get(api_url, params=params)
+response = requests.get(api_url, params=params, verify=False)
 crypto_data = response.json()
 
 # Process each cryptocurrency

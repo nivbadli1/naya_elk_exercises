@@ -6,8 +6,16 @@ Python client and **Kibana**.
 
 The folders are numbered. Work through them in order.
 
+| Folder | Where | What |
+|--------|-------|------|
+| `00_setup` | In class | Start Elasticsearch + Kibana |
+| `01_nyc_taxi_to_elasticsearch` | In class | Kafka → Elasticsearch, first queries and aggregations |
+| `02_crypto_pipeline` | In class (demo) | End-to-end pipeline: Airflow + Kafka + Spark → PostgreSQL / Elasticsearch |
+| `03_kibana_guided` | In class | Guided Kibana exercise on the `nyctaxi` data: Dev Tools, Discover, dashboard |
+| `04_homework` | **At home** | Build a crypto pipeline on your own: Kafka → Elasticsearch with a mapping → queries → Kibana dashboard |
+
 ```
-elasticsearch-course/
+naya_elk_exercises/
 ├── 00_setup/
 │   └── docker-compose.yml                         # Elasticsearch + Kibana
 ├── 01_nyc_taxi_to_elasticsearch/                  # Part 1 - core Elasticsearch exercises
@@ -17,12 +25,17 @@ elasticsearch-course/
 │       ├── 01_query_filtering.py                  # bool + term query
 │       ├── 02_aggregation_trips_by_vendor.py      # terms aggregation (GROUP BY)
 │       └── 03_aggregation_avg_fare_by_payment.py  # nested aggregation + script
-└── 02_crypto_pipeline/                            # Part 2 - end-to-end pipeline
-    ├── 01_producer/coins_producer.py              # CoinGecko API -> Kafka
-    ├── 02_airflow/dag_ssh.py                      # Airflow runs the producer over SSH
-    └── 03_consumers/
-        ├── 01_consumer_postgres.py                # Spark: Kafka -> PostgreSQL
-        └── 02_consumer_elasticsearch.py           # Spark: Kafka -> Elasticsearch -> Kibana
+├── 02_crypto_pipeline/                            # Part 2 - end-to-end pipeline
+│   ├── 01_producer/coins_producer.py              # CoinGecko API -> Kafka
+│   ├── 02_airflow/dag_ssh.py                      # Airflow runs the producer over SSH
+│   └── 03_consumers/
+│       ├── 01_consumer_postgres.py                # Spark: Kafka -> PostgreSQL
+│       └── 02_consumer_elasticsearch.py           # Spark: Kafka -> Elasticsearch -> Kibana
+├── 03_kibana_guided/
+│   └── kibana_exercise.md                         # Part 3 - guided Kibana exercise (answers included)
+└── 04_homework/                                   # Homework - done independently
+    ├── README.md                                  # The assignment
+    └── kibana_dashboard_guide.md                  # Step-by-step dashboard guide
 ```
 
 ---
@@ -222,3 +235,38 @@ spark-submit 02_crypto_pipeline/03_consumers/02_consumer_elasticsearch.py
 
 **Discussion:** Compare the `crypto_data` mapping with `nyctaxi`. Here Spark sends real
 `double` and `timestamp` types, so aggregations work directly without scripts.
+
+---
+
+## Part 3 - Guided Kibana Exercise (`03_kibana_guided/kibana_exercise.md`)
+
+Do this in class right after Part 1, while the `nyctaxi` index contains data.
+Open the file and follow it in Kibana. Each question has a hidden answer: click
+**Expected answer ✅** to show it.
+
+| Section | Topic |
+|---------|-------|
+| Part 1 | Getting to know the index: `_count`, `_mapping`, sample documents |
+| Part 2 | Filtering (WHERE): `term`, `bool` / `must` |
+| Part 3 | Aggregations (GROUP BY): `terms`, nested aggregations |
+| Part 4 | Discover and the first visualization |
+| Part 5 | Build a 4-panel dashboard with auto refresh, plus discussion questions |
+| Bonus | Script query compared with a `range` query on a mapped field |
+
+---
+
+## Homework (`04_homework/`)
+
+After the lesson, students build the whole flow **on their own** with new data, crypto prices
+from CoinGecko:
+
+1. **Kafka Producer**: fetch the top 15 coins and send them to the topic `crypto_prices`.
+2. **Kafka Consumer**: create the index `cryptoprices` with an **explicit mapping**, then index the records.
+3. **3 analysis queries**: average prices, top gainers and losers, market trends.
+4. **Kibana dashboard**: line chart, bar chart, heat map and data table. See `kibana_dashboard_guide.md`.
+
+The full assignment is in [`04_homework/README.md`](04_homework/README.md).
+
+How it differs from the class demo in `02_crypto_pipeline`: the consumer is plain Python, not
+Spark, and the students define the mapping themselves. That fixes the `.keyword` and string
+problems they saw with `nyctaxi`, so aggregations work without scripts.

@@ -10,7 +10,7 @@ The folders are numbered. Work through them in order.
 |--------|-------|------|
 | `00_setup` | In class | Start the environment: Kafka, Kafdrop, Elasticsearch, Kibana, dev_env |
 | `01_nyc_taxi_to_elasticsearch` | In class | Kafka → Elasticsearch, first queries and aggregations |
-| `02_crypto_pipeline` | In class (demo) | End-to-end pipeline: Airflow + Kafka + Spark → PostgreSQL / Elasticsearch |
+| `02_crypto_pipeline` | In class (demo) | End-to-end pipeline: Kafka + Spark → PostgreSQL / Elasticsearch |
 | `03_kibana_guided` | In class | Guided Kibana exercise on the `nyctaxi` data: Dev Tools, Discover, dashboard |
 | `04_homework` | **At home** | Build a crypto pipeline on your own: Kafka → Elasticsearch with a mapping → queries → Kibana dashboard |
 
@@ -26,9 +26,8 @@ naya_elk_exercises/
 │       ├── 02_aggregation_trips_by_vendor.py      # terms aggregation (GROUP BY)
 │       └── 03_aggregation_avg_fare_by_payment.py  # nested aggregation + script
 ├── 02_crypto_pipeline/                            # Part 2 - end-to-end pipeline
-│   ├── 01_producer/coins_producer.py              # CoinGecko API -> Kafka
-│   ├── 02_airflow/dag_ssh.py                      # Airflow runs the producer over SSH
-│   └── 03_consumers/
+│   ├── 01_producer/coins_producer.py              # CoinGecko API -> Kafka (every 60 seconds)
+│   └── 02_consumers/
 │       ├── 01_consumer_postgres.py                # Spark: Kafka -> PostgreSQL
 │       └── 02_consumer_elasticsearch.py           # Spark: Kafka -> Elasticsearch -> Kibana
 ├── 03_kibana_guided/
@@ -69,15 +68,14 @@ Elasticsearch and Kibana from Part 1 must still be running.
 
 | Step | Terminal | Run | Wait until / Check |
 |------|----------|-----|--------------------|
-| 1 | T2 | `spark-submit 02_crypto_pipeline/03_consumers/02_consumer_elasticsearch.py` | Spark starts and waits for data. **Keep it running.** |
-| 2 | T3 *(optional)* | `spark-submit 02_crypto_pipeline/03_consumers/01_consumer_postgres.py` | Prints `Batch N ...` lines. **Keep it running.** |
-| 3 | T1 | `export COINGECKO_API_KEY="<your key>"` then `python 02_crypto_pipeline/01_producer/coins_producer.py` | `Producing message to crypto_...` lines, then `Published data successfully` |
+| 1 | T2 | `spark-submit 02_crypto_pipeline/02_consumers/02_consumer_elasticsearch.py` | Spark starts and waits for data. **Keep it running.** |
+| 2 | T3 *(optional)* | `spark-submit 02_crypto_pipeline/02_consumers/01_consumer_postgres.py` | Prints `Batch N ...` lines. **Keep it running.** |
+| 3 | T1 | `python 02_crypto_pipeline/01_producer/coins_producer.py` | `Producing message to crypto_...` lines, then `Published data successfully`, repeated every 60 seconds. **Keep it running.** |
 | 4 | T2 | - | Log line `Batch N written to Elasticsearch successfully.` |
 | 5 | Kibana Dev Tools | `GET /crypto_data/_search` | Documents for 4 currencies |
-| 6 | Airflow UI | Copy `dag_ssh.py` to the `dags/` folder, set up `ssh_default`, then trigger `produce_coins_to_kafka` | The task finishes green. This replaces running step 3 by hand. |
-| 7 | Kibana | Create the `crypto_data` index pattern with the `timestamp` time field, then build the dashboard (Exercise 2.4) | The charts show the prices |
-| 8 | Airflow UI | Trigger the DAG a few more times | New points appear on the dashboard |
-| 9 | T2, T3 | `Ctrl+C` | Stop the Spark consumers |
+| 6 | Kibana | Create the `crypto_data` index pattern with the `timestamp` time field, then build the dashboard (Exercise 2.3) | The charts show the prices, with a new point every minute |
+| 7 | T1, T2, T3 | `Ctrl+C` | Stop the producer |
+| 8 | T2, T3 | `Ctrl+C` | Stop the Spark consumers |
 
 > In Part 2, **start the Spark consumers before the producer.** Spark Structured Streaming reads
 > Kafka from the `latest` offset by default, so it skips messages that were sent before it started.
@@ -87,7 +85,7 @@ Elasticsearch and Kibana from Part 1 must still be running.
 ## Prerequisites
 
 - Docker and Docker Compose. `00_setup/docker-compose.yml` starts Kafka, Elasticsearch, Kibana and the dev container.
-- For Part 2 only: Airflow and PostgreSQL from the course environment. They are not part of this compose file.
+- For the optional PostgreSQL consumer in Part 2 only: PostgreSQL from the course environment. It is not part of this compose file.
 - Python 3.7+
 
 ```bash
@@ -194,24 +192,16 @@ python 01_nyc_taxi_to_elasticsearch/03_queries/03_aggregation_avg_fare_by_paymen
 Fetches market data for Bitcoin, Ethereum, Solana and Tether from the CoinGecko API, and sends
 each coin to its own topic: `crypto_bitcoin`, `crypto_ethereum`, `crypto_solana` and `crypto_tether`.
 
-Get a free demo API key from [CoinGecko](https://www.coingecko.com/en/api) and set it as an
-environment variable. Never commit API keys to Git.
+The producer runs on its own and fetches new prices every 60 seconds until you stop it with `Ctrl+C`.
+The API works without a key. A free demo key from [CoinGecko](https://www.coingecko.com/en/api)
+raises the rate limit. Set it as an environment variable, and never commit API keys to Git.
 
 ```bash
-export COINGECKO_API_KEY="<your key>"
+export COINGECKO_API_KEY="<your key>"   # optional
 python 02_crypto_pipeline/01_producer/coins_producer.py
 ```
 
-### Exercise 2.2 - Airflow DAG (`02_airflow/dag_ssh.py`)
-The DAG `produce_coins_to_kafka` uses an `SSHOperator` to run the producer on the remote
-machine where the code lives.
-
-1. Copy the file into Airflow's `dags/` folder.
-2. In Airflow UI → Admin → Connections, create an SSH connection named `ssh_default`.
-3. Update the script path in `command` so it points to `coins_producer.py` on that machine.
-4. Trigger the DAG manually. It has no schedule (`schedule_interval=None`).
-
-### Exercise 2.3 - Spark consumers (`03_consumers/`)
+### Exercise 2.2 - Spark consumers (`02_consumers/`)
 Both consumers use Spark Structured Streaming with the same steps:
 read Kafka → cast `value` to string → `from_json` with a schema → select and rename columns → `foreachBatch` write.
 
@@ -221,7 +211,7 @@ read Kafka → cast `value` to string → `from_json` with a schema → select a
 | `02_consumer_elasticsearch.py` | all 4 crypto topics | Elasticsearch index `crypto_data` |
 
 ```bash
-spark-submit 02_crypto_pipeline/03_consumers/02_consumer_elasticsearch.py
+spark-submit 02_crypto_pipeline/02_consumers/02_consumer_elasticsearch.py
 ```
 
 > **Version note:** `02_consumer_elasticsearch.py` uses the connector
@@ -231,13 +221,13 @@ spark-submit 02_crypto_pipeline/03_consumers/02_consumer_elasticsearch.py
 > The checkpoint location is `s3a://elastic-checkpoint/`, the MinIO/S3 bucket of the course
 > environment. For a local run, change it to a local folder such as `/tmp/elastic-checkpoint`.
 
-### Exercise 2.4 - Kibana dashboard
+### Exercise 2.3 - Kibana dashboard
 1. Stack Management → Index Patterns → create `crypto_data`, with **`timestamp`** as the time field.
 2. In Discover, view the incoming documents.
 3. Build a dashboard with:
    - a line chart of the average `price` over `timestamp`, split by `currency`
    - a metric with the latest `market_cap` per currency
-4. Trigger the Airflow DAG a few times and watch the dashboard update.
+4. Keep the producer running and watch the dashboard update every minute.
 
 **Discussion:** Compare the `crypto_data` mapping with `nyctaxi`. Here Spark sends real
 `double` and `timestamp` types, so aggregations work directly without scripts.

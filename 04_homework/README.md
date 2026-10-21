@@ -326,6 +326,7 @@ for crypto in crypto_data:
 - [Kafka Python Documentation](https://kafka-python.readthedocs.io/)
 - [Elasticsearch Python Client](https://elasticsearch-py.readthedocs.io/)
 - [Kibana User Guide](https://www.elastic.co/guide/en/kibana/current/index.html)
+
 ---
 
 ## Solution (after submission)
